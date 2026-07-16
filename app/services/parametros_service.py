@@ -61,6 +61,8 @@ def obtener_parametros_cxp(db: Session) -> CxpParametroResponse:
         id=obj.id,
         cuenta_proveedores_id=obj.cuenta_proveedores_id,
         cuenta_proveedores_display=_display(db, obj.cuenta_proveedores_id),
+        cuenta_mercancias_recibidas_id=obj.cuenta_mercancias_recibidas_id,
+        cuenta_mercancias_recibidas_display=_display(db, obj.cuenta_mercancias_recibidas_id),
     )
 
 
@@ -72,6 +74,8 @@ def actualizar_parametros_cxp(
         raise Exception("Parámetros CxP no inicializados")
     if data.cuenta_proveedores_id is not None:
         obj.cuenta_proveedores_id = data.cuenta_proveedores_id
+    if data.cuenta_mercancias_recibidas_id is not None:
+        obj.cuenta_mercancias_recibidas_id = data.cuenta_mercancias_recibidas_id
     obj.modificado_por = uuid.UUID(actor.id)
     obj.modificado_en = datetime.now(timezone.utc)
     db.commit()

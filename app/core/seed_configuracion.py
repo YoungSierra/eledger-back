@@ -27,7 +27,7 @@ CONFIGS = [
     # Facturación
     ("dias_validez_cotizacion",         "30",      "integer", "Días de validez por defecto para una cotización de venta"),
     ("factura_requiere_cotizacion",     "false",   "boolean", "Exige que toda factura de venta tenga una cotización aprobada previa"),
-    ("proveedor_tecnologico_nombre",    "",        "string",  "Nombre del proveedor tecnológico habilitado DIAN (PTH). Aparece en el pie de la factura electrónica."),
+
 ]
 
 

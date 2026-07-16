@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.permisos import require_permission
 from app.schemas.auth import UsuarioActual
-from app.schemas.periodos import PeriodoCreate, PeriodoUpdate, PeriodoResponse
+from app.schemas.periodos import PeriodoCreate, PeriodoUpdate, PeriodoResponse, GenerarAnioRequest
 from app.services import periodo_service
 
 router = APIRouter(prefix="/periodos", tags=["Períodos contables"])
@@ -31,6 +31,15 @@ def crear(
     return periodo_service.crear_periodo(db, body, actor)
 
 
+@router.post("/generar-anio", response_model=list[PeriodoResponse], status_code=201)
+def generar_anio(
+    body: GenerarAnioRequest,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(require_permission("administracion", "crear")),
+):
+    return periodo_service.generar_anio(db, body.anio, actor)
+
+
 @router.get("/{periodo_id}", response_model=PeriodoResponse)
 def obtener(
     periodo_id: uuid.UUID,
@@ -48,6 +57,15 @@ def actualizar(
     actor: UsuarioActual = Depends(require_permission("administracion", "editar")),
 ):
     return periodo_service.actualizar_periodo(db, periodo_id, body, actor)
+
+
+@router.post("/{periodo_id}/iniciar", response_model=PeriodoResponse)
+def iniciar(
+    periodo_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(require_permission("administracion", "editar")),
+):
+    return periodo_service.iniciar_periodo(db, periodo_id, actor)
 
 
 @router.post("/{periodo_id}/reabrir", response_model=PeriodoResponse)

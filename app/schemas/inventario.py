@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from typing import Optional
 import uuid
@@ -244,3 +245,134 @@ class BodegaResponse(BaseModel):
     responsable_nombre: Optional[str] = None
     activo: bool
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# Saldos de inventario
+# ---------------------------------------------------------------------------
+
+class SaldoProducto(BaseModel):
+    producto_id: uuid.UUID
+    producto_codigo: str
+    producto_nombre: str
+    um_base_codigo: str
+    bodega_id: uuid.UUID
+    bodega_nombre: str
+    cantidad: Decimal
+    costo_promedio: Decimal
+    valor_total: Decimal
+
+
+class SaldoListResponse(BaseModel):
+    items: list[SaldoProducto]
+    total: int
+    pagina: int
+    por_pagina: int
+
+
+# ---------------------------------------------------------------------------
+# Kardex
+# ---------------------------------------------------------------------------
+
+class KardexLinea(BaseModel):
+    fecha: str
+    movimiento_id: uuid.UUID
+    numero: Optional[str]
+    tipo: str
+    descripcion: Optional[str]
+    origen_tipo: Optional[str]
+    origen_id: Optional[uuid.UUID]
+    cantidad_entrada: Decimal
+    cantidad_salida: Decimal
+    costo_unitario: Decimal
+    costo_total: Decimal
+    saldo_cantidad: Decimal
+    saldo_valor: Decimal
+    costo_promedio: Decimal
+
+
+class KardexResponse(BaseModel):
+    producto_id: uuid.UUID
+    producto_codigo: str
+    producto_nombre: str
+    bodega_id: Optional[uuid.UUID]
+    bodega_nombre: Optional[str]
+    lineas: list[KardexLinea]
+
+
+# ---------------------------------------------------------------------------
+# Movimientos
+# ---------------------------------------------------------------------------
+
+class MovimientoListItem(BaseModel):
+    id: uuid.UUID
+    numero: Optional[str]
+    tipo: str
+    fecha: str
+    bodega_id: uuid.UUID
+    bodega_nombre: str
+    bodega_destino_nombre: Optional[str]
+    descripcion: Optional[str]
+    estado: str
+    origen_tipo: Optional[str]
+    origen_id: Optional[uuid.UUID]
+    num_lineas: int
+    costo_total: Decimal
+
+class MovimientoListResponse(BaseModel):
+    items: list[MovimientoListItem]
+    total: int
+    pagina: int
+    por_pagina: int
+
+class MovimientoLineaDetalle(BaseModel):
+    id: uuid.UUID
+    producto_id: uuid.UUID
+    producto_codigo: str
+    producto_nombre: str
+    cantidad: Decimal
+    um_id: uuid.UUID
+    um_codigo: str
+    costo_unitario: Decimal
+    costo_total: Decimal
+
+class MovimientoDetalle(BaseModel):
+    id: uuid.UUID
+    numero: Optional[str]
+    tipo: str
+    fecha: str
+    bodega_id: uuid.UUID
+    bodega_nombre: str
+    bodega_destino_id: Optional[uuid.UUID]
+    bodega_destino_nombre: Optional[str]
+    descripcion: Optional[str]
+    estado: str
+    origen_tipo: Optional[str]
+    origen_id: Optional[uuid.UUID]
+    asiento_id: Optional[uuid.UUID]
+    lineas: list[MovimientoLineaDetalle]
+    costo_total: Decimal
+
+
+# ---------------------------------------------------------------------------
+# Movimiento manual (ajuste o traslado)
+# ---------------------------------------------------------------------------
+
+class MovimientoLineaCreate(BaseModel):
+    producto_id: uuid.UUID
+    cantidad: Decimal = Field(gt=0)
+    um_id: uuid.UUID
+    costo_unitario: Decimal = Field(ge=0)
+
+class MovimientoManualCreate(BaseModel):
+    tipo: str = Field(pattern="^(AJUSTE_ENTRADA|AJUSTE_SALIDA|TRASLADO)$")
+    fecha: date
+    bodega_id: uuid.UUID
+    bodega_destino_id: Optional[uuid.UUID] = None  # solo para TRASLADO
+    descripcion: Optional[str] = None
+    lineas: list[MovimientoLineaCreate] = Field(min_length=1)
+    publicar: bool = False
+
+# Alias para compatibilidad
+AjusteLineaCreate = MovimientoLineaCreate
+AjusteCreate = MovimientoManualCreate

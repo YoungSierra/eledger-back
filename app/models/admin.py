@@ -128,6 +128,7 @@ class AdmUsuario(Base, AuditMixin):
     email: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
     nombre: Mapped[str] = mapped_column(String(100), nullable=False)
     apellido: Mapped[str] = mapped_column(String(100), nullable=False)
+    telefono: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     rol_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_rol.id"), nullable=False)
     tercero_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=True)

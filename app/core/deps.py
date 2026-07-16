@@ -47,6 +47,29 @@ def get_current_user(
         .all()
     )
 
+    # Acciones de módulo: "{modulo}:{accion}" cuando el rol tiene ese permiso en alguna opción
+    ACCIONES = ["autorizar", "crear", "editar", "eliminar", "imprimir"]
+    modulos_acciones: list[str] = []
+    for accion in ACCIONES:
+        col = getattr(AdmPermisoOpcion, f"puede_{accion}", None)
+        if col is None:
+            continue
+        modulos_con_accion = (
+            db.query(AdmModulo.codigo)
+            .join(AdmOpcion, AdmOpcion.modulo_id == AdmModulo.id)
+            .join(AdmPermisoOpcion, AdmPermisoOpcion.opcion_id == AdmOpcion.id)
+            .filter(
+                AdmPermisoOpcion.rol_id == usuario.rol_id,
+                col == True,
+                AdmOpcion.activo == True,
+                AdmModulo.activo == True,
+            )
+            .distinct()
+            .all()
+        )
+        for (codigo,) in modulos_con_accion:
+            modulos_acciones.append(f"{codigo}:{accion}")
+
     return UsuarioActual(
         id=str(usuario.id),
         email=usuario.email,
@@ -55,5 +78,5 @@ def get_current_user(
         rol_id=str(usuario.rol_id),
         ver_solo_propios=usuario.ver_solo_propios,
         es_asesor=usuario.es_asesor,
-        permisos=[r.ruta for r in rutas],
+        permisos=[r.ruta for r in rutas] + modulos_acciones,
     )

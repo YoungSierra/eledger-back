@@ -47,6 +47,7 @@ TIPOS_DOCUMENTO = [
     ("ANU",  "Anulación contable",        "contabilidad"),
     ("AJU",  "Ajuste contable",           "contabilidad"),
     ("REM",  "Remisión / despacho",        "facturacion"),
+    ("RECP", "Recepción de mercancía",       "compras"),
     ("COT",  "Cotización de venta",        "facturacion"),
     ("ANT",  "Anticipo de cliente",        "cxc"),
     ("ANTP", "Anticipo a proveedor",       "cxp"),

@@ -74,6 +74,33 @@ def actualizar_operacion(
     op = obtener_operacion(db, operacion_id)
     if op.estado == "CERRADA":
         raise HTTPException(status_code=400, detail="No se puede modificar una operación cerrada")
+
+    # Validación de cierre: no se puede cerrar con MAWB/HAWB en borrador.
+    # Deben estar emitidos (o anulados) antes de cerrar la operación.
+    if data.estado == "CERRADA":
+        mawb_borr = db.query(OpeMawb).filter(
+            OpeMawb.operacion_id == op.id, OpeMawb.estado == "BORRADOR"
+        ).count()
+        hawb_borr = db.query(OpeHawb).filter(
+            OpeHawb.operacion_id == op.id, OpeHawb.estado == "BORRADOR"
+        ).count()
+        manif_borr = db.query(OpeManifiesto).filter(
+            OpeManifiesto.operacion_id == op.id, OpeManifiesto.estado == "BORRADOR"
+        ).count()
+        pendientes = []
+        if mawb_borr:
+            pendientes.append(f"{mawb_borr} MAWB")
+        if hawb_borr:
+            pendientes.append(f"{hawb_borr} HAWB")
+        if manif_borr:
+            pendientes.append(f"{manif_borr} manifiesto(s)")
+        if pendientes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No se puede cerrar la operación: hay {' y '.join(pendientes)} en borrador. "
+                       "Deben estar emitidos o anulados antes de cerrar.",
+            )
+
     for campo, valor in data.model_dump(exclude_none=True).items():
         setattr(op, campo, valor)
     op.modificado_por = uuid.UUID(actor.id)
@@ -249,6 +276,9 @@ def actualizar_manifiesto(
     db: Session, operacion_id: uuid.UUID, manifiesto_id: uuid.UUID,
     data: OpeManifiestoUpdate, actor: UsuarioActual,
 ) -> OpeManifiesto:
+    op = obtener_operacion(db, operacion_id)
+    if op.estado == "CERRADA":
+        raise HTTPException(status_code=400, detail="No se puede modificar una operación cerrada")
     m = db.query(OpeManifiesto).filter(
         OpeManifiesto.id == manifiesto_id, OpeManifiesto.operacion_id == operacion_id
     ).first()

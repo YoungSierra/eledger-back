@@ -26,7 +26,8 @@ from app.models.contabilidad import (
 from app.models.adm import AdmTercero
 from app.models.bancos import BanBanco, BanCuenta
 from app.models.facturacion import FacResolucion
-from app.models.inventario import InvBodega, InvFamilia, InvUnidadMedida, InvTipoProducto, InvProducto, InvProductoUm
+from app.models.inventario import InvBodega, InvFamilia, InvUnidadMedida, InvTipoProducto, InvProducto, InvProductoUm, InvProductoBodega, InvMovimiento, InvMovimientoLinea
+from app.models.compras import ComOrdenCompra, ComOcLinea, ComRecepcion, ComRecepcionLinea
 from app.models.ope import (
     OpeAerolinea,
     OpeAeropuerto,

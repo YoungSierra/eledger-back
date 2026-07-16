@@ -23,9 +23,12 @@ class CxcParametroResponse(BaseModel):
 
 class CxpParametroUpdate(BaseModel):
     cuenta_proveedores_id: Optional[uuid.UUID] = None
+    cuenta_mercancias_recibidas_id: Optional[uuid.UUID] = None
 
 
 class CxpParametroResponse(BaseModel):
     id: uuid.UUID
     cuenta_proveedores_id: Optional[uuid.UUID]
     cuenta_proveedores_display: Optional[str]
+    cuenta_mercancias_recibidas_id: Optional[uuid.UUID]
+    cuenta_mercancias_recibidas_display: Optional[str]

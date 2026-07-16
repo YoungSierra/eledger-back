@@ -1,4 +1,6 @@
+import uuid
 from datetime import date
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -125,3 +127,69 @@ def balanza_excel(
     actor: UsuarioActual = Depends(get_current_user),
 ):
     return reportes_service.balanza_excel(db, fecha_desde, fecha_hasta, nivel)
+
+
+@router.get("/inventario-valorado")
+def inventario_valorado(
+    fecha_corte: date = Query(...),
+    bodega_id: Optional[uuid.UUID] = Query(None),
+    familia_id: Optional[uuid.UUID] = Query(None),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return reportes_service.inventario_valorado(db, fecha_corte, bodega_id, familia_id)
+
+
+@router.get("/inventario-valorado/excel")
+def inventario_valorado_excel(
+    fecha_corte: date = Query(...),
+    bodega_id: Optional[uuid.UUID] = Query(None),
+    familia_id: Optional[uuid.UUID] = Query(None),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return reportes_service.inventario_valorado_excel(db, fecha_corte, bodega_id, familia_id)
+
+
+@router.get("/ventas-agrupacion")
+def ventas_agrupacion(
+    fecha_desde: date = Query(...),
+    fecha_hasta: date = Query(...),
+    agrupar_por: str = Query("cliente"),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return reportes_service.ventas_agrupacion(db, fecha_desde, fecha_hasta, agrupar_por)
+
+
+@router.get("/ventas-agrupacion/excel")
+def ventas_agrupacion_excel(
+    fecha_desde: date = Query(...),
+    fecha_hasta: date = Query(...),
+    agrupar_por: str = Query("cliente"),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return reportes_service.ventas_agrupacion_excel(db, fecha_desde, fecha_hasta, agrupar_por)
+
+
+@router.get("/compras-agrupacion")
+def compras_agrupacion(
+    fecha_desde: date = Query(...),
+    fecha_hasta: date = Query(...),
+    agrupar_por: str = Query("proveedor"),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return reportes_service.compras_agrupacion(db, fecha_desde, fecha_hasta, agrupar_por)
+
+
+@router.get("/compras-agrupacion/excel")
+def compras_agrupacion_excel(
+    fecha_desde: date = Query(...),
+    fecha_hasta: date = Query(...),
+    agrupar_por: str = Query("proveedor"),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return reportes_service.compras_agrupacion_excel(db, fecha_desde, fecha_hasta, agrupar_por)

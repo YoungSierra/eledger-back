@@ -161,10 +161,12 @@ def listar_cotizaciones(
         q = q.filter(OpeCotizacion.cliente_id == cliente_id)
     if busqueda:
         term = f"%{busqueda}%"
-        q = q.filter(
+        q = q.join(AdmTercero, OpeCotizacion.cliente_id == AdmTercero.id).filter(
             OpeCotizacion.numero.ilike(term) |
             OpeCotizacion.origen.ilike(term) |
-            OpeCotizacion.destino.ilike(term)
+            OpeCotizacion.destino.ilike(term) |
+            AdmTercero.razon_social.ilike(term) |
+            AdmTercero.nit.ilike(term)
         )
     if fecha_desde:
         q = q.filter(OpeCotizacion.fecha >= fecha_desde)

@@ -36,6 +36,7 @@ def crear_usuario(db: Session, data: UsuarioCreate, actor: UsuarioActual) -> Adm
         email=data.email,
         nombre=data.nombre,
         apellido=data.apellido,
+        telefono=data.telefono,
         password_hash=hash_password(data.password),
         rol_id=data.rol_id,
         tercero_id=data.tercero_id,
@@ -60,6 +61,8 @@ def actualizar_usuario(
         u.nombre = data.nombre
     if data.apellido is not None:
         u.apellido = data.apellido
+    if data.telefono is not None:
+        u.telefono = data.telefono
     if data.rol_id is not None:
         rol = db.query(AdmRol).filter(AdmRol.id == data.rol_id, AdmRol.activo == True).first()
         if not rol:

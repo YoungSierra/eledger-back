@@ -3,12 +3,20 @@ from decimal import Decimal
 from typing import Optional
 import uuid
 
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, Numeric, SmallInteger, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime, ForeignKey, Integer, Numeric, SmallInteger, String, Table, Text, UniqueConstraint
 from sqlalchemy.dialects import postgresql as pg
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.models.base import AuditMixin
+
+# Tabla de vínculo factura ↔ remisiones (muchos a muchos)
+fac_factura_remision = Table(
+    "fac_factura_remision",
+    Base.metadata,
+    Column("factura_id", ForeignKey("fac_factura.id"), primary_key=True),
+    Column("remision_id", ForeignKey("inv_remision.id"), primary_key=True),
+)
 
 
 class FacResolucion(Base, AuditMixin):
@@ -56,6 +64,7 @@ class FacFactura(Base, AuditMixin):
     asiento_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_asiento.id"), nullable=True)
     asiento_modificado_manual: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     cxc_documento_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cxc_documento.id"), nullable=True)
+    bodega_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("inv_bodega.id"), nullable=True)
     cufe: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     fecha_dian: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     dian_estado: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
@@ -66,6 +75,9 @@ class FacFactura(Base, AuditMixin):
     )
     retenciones: Mapped[list["FacFacturaRetencion"]] = relationship(
         "FacFacturaRetencion", back_populates="factura", cascade="all, delete-orphan",
+    )
+    remisiones: Mapped[list["InvRemision"]] = relationship(
+        "InvRemision", secondary=fac_factura_remision, viewonly=False,
     )
 
 
@@ -93,6 +105,7 @@ class FacFacturaLinea(Base):
     total: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     cuenta_ingreso_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
     centro_costo_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_centro_costo.id"), nullable=True)
+    remision_linea_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("inv_remision_linea.id"), nullable=True)
     orden: Mapped[int] = mapped_column(SmallInteger, default=1, nullable=False)
 
     factura: Mapped["FacFactura"] = relationship("FacFactura", back_populates="lineas")
@@ -114,3 +127,31 @@ class FacFacturaRetencion(Base):
     cuenta_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=False)
 
     factura: Mapped["FacFactura"] = relationship("FacFactura", back_populates="retenciones")
+
+
+class FacConfigElectronica(Base, AuditMixin):
+    """
+    Configuración del proveedor de facturación electrónica. Fila única por empresa
+    (una empresa = una BD). Ver docs/modelos/datos/fase-4-esquema.md:170.
+
+    `credenciales` es JSONB porque cada proveedor pide campos distintos:
+    Dataico usa {account_id, auth_token}. El token va ENCRIPTADO (Fernet) desde
+    el service — nunca en claro en la BD ni en las respuestas de la API.
+    """
+    __tablename__ = "fac_config_electronica"
+    __table_args__ = (
+        CheckConstraint(
+            "proveedor IN ('DATAICO','PTH_APIFE','PTH_SIECOM','PTH_FACTUS','DIAN_DIRECTO')",
+            name="chk_config_electronica_proveedor",
+        ),
+        CheckConstraint("ambiente IN ('PRUEBAS','PRODUCCION')", name="chk_config_electronica_ambiente"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    proveedor: Mapped[str] = mapped_column(String(30), nullable=False)
+    # Nombre comercial del PTH que se imprime en el pie de la factura. Vive aquí
+    # y no en adm_configuracion para no partir la config del proveedor en dos.
+    nombre_pth: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    credenciales: Mapped[dict] = mapped_column(pg.JSONB, nullable=False, default=dict)
+    ambiente: Mapped[str] = mapped_column(String(20), nullable=False, default="PRUEBAS")
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

@@ -46,18 +46,19 @@ OPCIONES = [
     ("cxp", "saldos_cxp",     "Saldos proveedores",     "/dashboard/cxp/saldos",       7, True),
     ("administracion", "parametros_cxp", "Parámetros CxP", "/dashboard/administracion/parametros-cxp", 10, True),
 
-    ("inventario", "productos",    "Productos",    "/dashboard/inventario/productos",   1, True),
-    ("inventario", "bodegas",      "Bodegas",      "/dashboard/inventario/bodegas",     2, True),
-    ("inventario", "movimientos",  "Movimientos",  "/dashboard/inventario/movimientos", 3, False),
-    ("inventario", "remisiones",   "Remisiones",   "/dashboard/inventario/remisiones",  4, False),
+    ("inventario", "saldos",       "Saldos / Kardex", "/dashboard/inventario/saldos",      1, True),
+    ("inventario", "productos",    "Productos",       "/dashboard/inventario/productos",   2, True),
+    ("inventario", "bodegas",      "Bodegas",         "/dashboard/inventario/bodegas",     3, True),
+    ("inventario", "movimientos",  "Movimientos",     "/dashboard/inventario/movimientos", 4, True),
+    ("inventario", "remisiones",   "Remisiones",      "/dashboard/inventario/remisiones",  5, False),
 
-    ("compras", "ordenes",     "Órdenes de compra", "/dashboard/compras/ordenes",     1, False),
-    ("compras", "recepciones", "Recepciones",       "/dashboard/compras/recepciones",  2, False),
+    ("compras", "ordenes",     "Órdenes de compra", "/dashboard/compras/ordenes",     1, True),
+    ("compras", "recepciones", "Recepciones",       "/dashboard/compras/recepciones",  2, True),
 
     ("facturacion", "facturas_fac",  "Facturas de venta",    "/dashboard/facturacion/facturas",      1, True),
     ("facturacion", "cotizaciones",  "Cotizaciones",         "/dashboard/facturacion/cotizaciones",  2, False),
     ("facturacion", "devoluciones",  "Devoluciones",         "/dashboard/facturacion/devoluciones",  3, False),
-    ("facturacion", "electronica",   "Factura electrónica",  "/dashboard/facturacion/electronica",   5, False),
+    ("facturacion", "electronica",   "Factura electrónica",  "/dashboard/facturacion/electronica",   5, True),
 
     ("bancos", "bancos_cuentas",  "Cuentas bancarias",  "/dashboard/bancos/cuentas",         1, True),
     ("bancos", "extractos",      "Extractos",          "/dashboard/bancos/extractos",       2, False),
@@ -73,17 +74,17 @@ OPCIONES = [
     ("operaciones", "aeropuertos",   "Aeropuertos",    "/dashboard/operaciones/aeropuertos",  4, True),
     ("operaciones", "conceptos",     "Conceptos",      "/dashboard/operaciones/conceptos",    5, True),
 
-    ("reportes", "balance",         "Balance general",         "/dashboard/reportes/balance",       1, False),
-    ("reportes", "resultados",      "Estado de resultados",    "/dashboard/reportes/resultados",    2, False),
+    ("reportes", "balance",         "Balance general",         "/dashboard/reportes/balance",       1, True),
+    ("reportes", "resultados",      "Estado de resultados",    "/dashboard/reportes/resultados",    2, True),
     ("reportes", "flujo",           "Flujo de efectivo",       "/dashboard/reportes/flujo",         3, False),
     ("reportes", "patrimonio",      "Cambios en patrimonio",   "/dashboard/reportes/patrimonio",    4, False),
-    ("reportes", "mayor",           "Libro mayor",             "/dashboard/reportes/mayor",         5, False),
-    ("reportes", "balanza",         "Balanza de comprobación", "/dashboard/reportes/balanza",       6, False),
-    ("reportes", "inv_valorado",    "Inventario valorado",     "/dashboard/reportes/inventario",    8, False),
-    ("reportes", "auxiliar_tercero","Auxiliar por tercero",    "/dashboard/reportes/auxiliar",      9, False),
+    ("reportes", "mayor",           "Libro mayor",             "/dashboard/reportes/mayor",         5, True),
+    ("reportes", "balanza",         "Balanza de comprobación", "/dashboard/reportes/balanza",       6, True),
+    ("reportes", "inv_valorado",    "Inventario valorado",     "/dashboard/reportes/inventario",    8, True),
+    ("reportes", "auxiliar_tercero","Auxiliar por tercero",    "/dashboard/reportes/auxiliar",      9, True),
     ("reportes", "concil_ban",      "Conciliación bancaria",   "/dashboard/reportes/conciliacion", 11, False),
-    ("reportes", "ventas_agrup",    "Ventas por agrupación",   "/dashboard/reportes/ventas",       12, False),
-    ("reportes", "compras_agrup",   "Compras por agrupación",  "/dashboard/reportes/compras",      13, False),
+    ("reportes", "ventas_agrup",    "Ventas por agrupación",   "/dashboard/reportes/ventas",       12, True),
+    ("reportes", "compras_agrup",   "Compras por agrupación",  "/dashboard/reportes/compras",      13, True),
 ]
 
 

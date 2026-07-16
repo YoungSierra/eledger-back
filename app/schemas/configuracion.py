@@ -11,4 +11,6 @@ class ConfiguracionResponse(BaseModel):
     valor: str
     tipo: str
     descripcion: Optional[str]
+    bloqueado: bool = False
+    motivo_bloqueo: Optional[str] = None
     model_config = {"from_attributes": True}

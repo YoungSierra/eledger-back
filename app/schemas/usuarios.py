@@ -8,6 +8,7 @@ class UsuarioCreate(BaseModel):
     email: EmailStr
     nombre: str
     apellido: str
+    telefono: Optional[str] = None
     password: str
     rol_id: uuid.UUID
     tercero_id: Optional[uuid.UUID] = None
@@ -18,6 +19,7 @@ class UsuarioCreate(BaseModel):
 class UsuarioUpdate(BaseModel):
     nombre: Optional[str] = None
     apellido: Optional[str] = None
+    telefono: Optional[str] = None
     rol_id: Optional[uuid.UUID] = None
     tercero_id: Optional[uuid.UUID] = None
     es_asesor: Optional[bool] = None
@@ -31,6 +33,7 @@ class UsuarioResponse(BaseModel):
     email: str
     nombre: str
     apellido: str
+    telefono: Optional[str] = None
     rol_id: uuid.UUID
     tercero_id: Optional[uuid.UUID] = None
     es_asesor: bool = False

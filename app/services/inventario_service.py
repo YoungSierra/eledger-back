@@ -1,13 +1,19 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
+from decimal import Decimal
 from typing import Optional
 
 from fastapi import HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.admin import AdmUsuario
-from app.models.contabilidad import CntCuenta
-from app.models.inventario import InvBodega, InvFamilia, InvUnidadMedida, InvTipoProducto, InvProducto, InvProductoUm
+from app.models.admin import AdmMoneda, AdmTipoDocumento, AdmConsecutivo
+from app.models.adm import AdmTercero
+from app.models.contabilidad import CntAsiento, CntAsientoLinea, CntCuenta, CntPeriodo
+from app.models.inventario import (
+    InvBodega, InvFamilia, InvUnidadMedida, InvTipoProducto,
+    InvProducto, InvProductoUm, InvProductoBodega, InvMovimiento, InvMovimientoLinea,
+)
 from app.schemas.auth import UsuarioActual
 from app.schemas.inventario import (
     BodegaCreate, BodegaUpdate, BodegaResponse,
@@ -16,6 +22,9 @@ from app.schemas.inventario import (
     TipoProductoUpdate, TipoProductoResponse,
     ProductoCreate, ProductoUpdate, ProductoResponse,
     ProductoUmCreate, ProductoUmUpdate, ProductoUmResponse,
+    SaldoProducto, SaldoListResponse, KardexLinea, KardexResponse,
+    MovimientoListItem, MovimientoListResponse, MovimientoLineaDetalle,
+    MovimientoDetalle, AjusteCreate,
 )
 
 
@@ -254,11 +263,24 @@ def _producto_to_response(db: Session, obj: InvProducto) -> ProductoResponse:
     )
 
 
-def listar_productos(db: Session, solo_activos: bool = False) -> list[ProductoResponse]:
+def listar_productos(
+    db: Session,
+    solo_activos: bool = False,
+    q_busqueda: Optional[str] = None,
+    limit: int = 200,
+    solo_inventariables: bool = False,
+) -> list[ProductoResponse]:
     q = db.query(InvProducto)
     if solo_activos:
         q = q.filter(InvProducto.activo == True)
-    return [_producto_to_response(db, p) for p in q.order_by(InvProducto.codigo).all()]
+    if solo_inventariables:
+        q = q.filter(InvProducto.maneja_inventario == True)
+    if q_busqueda:
+        term = f"%{q_busqueda}%"
+        q = q.filter(
+            (InvProducto.codigo.ilike(term)) | (InvProducto.nombre.ilike(term))
+        )
+    return [_producto_to_response(db, p) for p in q.order_by(InvProducto.codigo).limit(limit).all()]
 
 
 def crear_producto(db: Session, data: ProductoCreate, actor: UsuarioActual) -> ProductoResponse:
@@ -467,3 +489,693 @@ def actualizar_bodega(db: Session, id: uuid.UUID, data: BodegaUpdate, actor: Usu
     db.commit()
     db.refresh(obj)
     return _to_response(obj)
+
+
+# ---------------------------------------------------------------------------
+# Saldos de inventario
+# ---------------------------------------------------------------------------
+
+def listar_saldos(
+    db: Session,
+    pagina: int = 1,
+    por_pagina: int = 30,
+    bodega_id: uuid.UUID | None = None,
+    producto_id: uuid.UUID | None = None,
+    q: str | None = None,
+    solo_con_stock: bool = True,
+) -> SaldoListResponse:
+    query = (
+        db.query(InvProductoBodega)
+        .join(InvProductoBodega.producto)
+        .join(InvProductoBodega.bodega)
+    )
+    if bodega_id:
+        query = query.filter(InvProductoBodega.bodega_id == bodega_id)
+    if producto_id:
+        query = query.filter(InvProductoBodega.producto_id == producto_id)
+    if solo_con_stock:
+        query = query.filter(InvProductoBodega.cantidad > 0)
+    if q:
+        term = f"%{q}%"
+        query = query.filter(
+            InvProducto.codigo.ilike(term) | InvProducto.nombre.ilike(term)
+        )
+
+    total = query.count()
+    rows = (
+        query.order_by(InvProducto.codigo)
+        .offset((pagina - 1) * por_pagina)
+        .limit(por_pagina)
+        .all()
+    )
+
+    items = []
+    for pb in rows:
+        p = pb.producto
+        b = pb.bodega
+        items.append(SaldoProducto(
+            producto_id=p.id,
+            producto_codigo=p.codigo,
+            producto_nombre=p.nombre,
+            um_base_codigo=p.um_base.codigo if p.um_base else "",
+            bodega_id=b.id,
+            bodega_nombre=b.nombre,
+            cantidad=pb.cantidad,
+            costo_promedio=pb.costo_promedio,
+            valor_total=pb.cantidad * pb.costo_promedio,
+        ))
+    return SaldoListResponse(items=items, total=total, pagina=pagina, por_pagina=por_pagina)
+
+
+# ---------------------------------------------------------------------------
+# Kardex
+# ---------------------------------------------------------------------------
+
+_TIPO_LABEL: dict[str, str] = {
+    "ENTRADA_COMPRA": "Entrada compra",
+    "SALIDA_VENTA": "Salida venta",
+    "AJUSTE_ENTRADA": "Ajuste entrada",
+    "AJUSTE_SALIDA": "Ajuste salida",
+    "TRASLADO_SALIDA": "Traslado salida",
+    "TRASLADO_ENTRADA": "Traslado entrada",
+}
+_TIPOS_SALIDA = {"SALIDA_VENTA", "AJUSTE_SALIDA", "TRASLADO_SALIDA"}
+
+
+def obtener_kardex(
+    db: Session,
+    producto_id: uuid.UUID,
+    bodega_id: uuid.UUID | None = None,
+    desde: date | None = None,
+    hasta: date | None = None,
+) -> KardexResponse:
+    producto = db.get(InvProducto, producto_id)
+    if not producto:
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+
+    bodega = db.get(InvBodega, bodega_id) if bodega_id else None
+
+    query = (
+        db.query(InvMovimientoLinea)
+        .join(InvMovimiento, InvMovimiento.id == InvMovimientoLinea.movimiento_id)
+        .filter(
+            InvMovimientoLinea.producto_id == producto_id,
+            InvMovimiento.estado == "confirmado",
+        )
+    )
+    if bodega_id:
+        query = query.filter(InvMovimiento.bodega_id == bodega_id)
+    if desde:
+        query = query.filter(func.date(InvMovimiento.fecha) >= desde)
+    if hasta:
+        query = query.filter(func.date(InvMovimiento.fecha) <= hasta)
+
+    lineas_raw = query.order_by(InvMovimiento.fecha, InvMovimiento.creado_en, InvMovimientoLinea.id).all()
+
+    saldo_cant = Decimal("0")
+    saldo_valor = Decimal("0")
+    lineas: list[KardexLinea] = []
+
+    for ml in lineas_raw:
+        mov = ml.movimiento
+        es_salida = mov.tipo in _TIPOS_SALIDA
+        cantidad = ml.cantidad_base
+
+        if es_salida:
+            costo_unit = saldo_valor / saldo_cant if saldo_cant > 0 else ml.costo_unitario
+            ct = (cantidad * costo_unit).quantize(Decimal("0.0001"))
+            saldo_cant -= cantidad
+            saldo_valor -= ct
+            entrada, salida = Decimal("0"), cantidad
+        else:
+            costo_unit = ml.costo_unitario
+            ct = ml.costo_total
+            saldo_cant += cantidad
+            saldo_valor += ct
+            entrada, salida = cantidad, Decimal("0")
+
+        saldo_cant = max(saldo_cant, Decimal("0"))
+        saldo_valor = max(saldo_valor, Decimal("0"))
+
+        lineas.append(KardexLinea(
+            fecha=mov.fecha.strftime("%Y-%m-%d"),
+            movimiento_id=mov.id,
+            numero=mov.numero,
+            tipo=_TIPO_LABEL.get(mov.tipo, mov.tipo),
+            descripcion=mov.descripcion,
+            origen_tipo=mov.origen_tipo,
+            origen_id=mov.origen_id,
+            cantidad_entrada=entrada,
+            cantidad_salida=salida,
+            costo_unitario=costo_unit,
+            costo_total=ct,
+            saldo_cantidad=saldo_cant,
+            saldo_valor=saldo_valor,
+            costo_promedio=saldo_valor / saldo_cant if saldo_cant > 0 else Decimal("0"),
+        ))
+
+    return KardexResponse(
+        producto_id=producto.id,
+        producto_codigo=producto.codigo,
+        producto_nombre=producto.nombre,
+        bodega_id=bodega_id,
+        bodega_nombre=bodega.nombre if bodega else None,
+        lineas=lineas,
+    )
+
+# ---------------------------------------------------------------------------
+# Helpers movimientos
+# ---------------------------------------------------------------------------
+
+_TIPO_LABEL_MOV = {
+    "ENTRADA_COMPRA":      "Entrada compra",
+    "SALIDA_VENTA":        "Salida venta",
+    "TRASLADO_SALIDA":     "Traslado salida",
+    "TRASLADO_ENTRADA":    "Traslado entrada",
+    "AJUSTE_ENTRADA":      "Ajuste entrada",
+    "AJUSTE_SALIDA":       "Ajuste salida",
+    "DEVOLUCION_CLIENTE":  "Devolucion cliente",
+    "DEVOLUCION_PROVEEDOR":"Devolucion proveedor",
+    "ENTRADA_PRODUCCION":  "Entrada produccion",
+    "SALIDA_PRODUCCION":   "Salida produccion",
+}
+
+
+def _buscar_periodo_inv(db, fecha):
+    from app.models.contabilidad import CntPeriodo
+    p = db.query(CntPeriodo).filter(
+        CntPeriodo.fecha_inicio <= fecha,
+        CntPeriodo.fecha_cierre >= fecha,
+        CntPeriodo.estado == "abierto",
+        CntPeriodo.activo == True,
+    ).first()
+    if not p:
+        raise HTTPException(status_code=400, detail=f"No existe periodo contable abierto para {fecha}")
+    return p
+
+
+def _resolver_cuenta_inventario_inv(db, producto):
+    if producto.cuenta_inventario_id:
+        return db.get(CntCuenta, producto.cuenta_inventario_id)
+    if producto.familia_id:
+        fam = db.get(InvFamilia, producto.familia_id)
+        if fam and fam.cuenta_inventario_id:
+            return db.get(CntCuenta, fam.cuenta_inventario_id)
+    tipo = db.get(InvTipoProducto, producto.tipo_id)
+    if tipo and tipo.cuenta_inventario_id:
+        return db.get(CntCuenta, tipo.cuenta_inventario_id)
+    return None
+
+
+def _resolver_cuenta_ajuste(db, producto, campo):
+    val = getattr(producto, campo, None)
+    if val:
+        return db.get(CntCuenta, val)
+    if producto.familia_id:
+        fam = db.get(InvFamilia, producto.familia_id)
+        if fam:
+            val = getattr(fam, campo, None)
+            if val:
+                return db.get(CntCuenta, val)
+    tipo = db.get(InvTipoProducto, producto.tipo_id)
+    if tipo:
+        val = getattr(tipo, campo, None)
+        if val:
+            return db.get(CntCuenta, val)
+    return None
+
+
+def _generar_numero(db, codigo_tipo: str):
+    """Genera el siguiente consecutivo para un tipo de documento. Retorna (td_id, numero_str)."""
+    td = db.query(AdmTipoDocumento).filter(AdmTipoDocumento.codigo == codigo_tipo).first()
+    if not td:
+        return None, None
+    cons = db.query(AdmConsecutivo).filter(AdmConsecutivo.tipo_documento_id == td.id).with_for_update().first()
+    if not cons:
+        return td.id, f"{codigo_tipo}-0001"
+    siguiente = cons.numero_actual + 1
+    cons.numero_actual = siguiente
+    return td.id, f"{cons.prefijo or ''}{str(siguiente).zfill(cons.longitud_minima)}"
+
+
+def _generar_numero_ajuste(db):
+    return _generar_numero(db, "AJ")
+
+
+# ---------------------------------------------------------------------------
+# Listar movimientos
+# ---------------------------------------------------------------------------
+
+def listar_movimientos(
+    db,
+    fecha_desde=None,
+    fecha_hasta=None,
+    tipo=None,
+    bodega_id=None,
+    estado=None,
+    pagina=1,
+    por_pagina=30,
+):
+    from app.models.inventario import InvMovimiento, InvMovimientoLinea, InvBodega
+    from sqlalchemy import func
+
+    q = db.query(
+        InvMovimiento,
+        InvBodega.nombre.label("bodega_nombre"),
+    ).join(InvBodega, InvBodega.id == InvMovimiento.bodega_id)
+
+    # Los traslados se muestran como una sola fila (TRASLADO_SALIDA lleva ambas bodegas)
+    q = q.filter(InvMovimiento.tipo != "TRASLADO_ENTRADA")
+
+    if fecha_desde:
+        q = q.filter(InvMovimiento.fecha >= fecha_desde)
+    if fecha_hasta:
+        from datetime import timedelta
+        q = q.filter(InvMovimiento.fecha < fecha_hasta + timedelta(days=1))
+    if tipo:
+        q = q.filter(InvMovimiento.tipo == tipo)
+    if bodega_id:
+        q = q.filter(
+            (InvMovimiento.bodega_id == bodega_id) | (InvMovimiento.bodega_destino_id == bodega_id)
+        )
+    if estado:
+        q = q.filter(InvMovimiento.estado == estado)
+
+    total = q.count()
+    rows = q.order_by(InvMovimiento.fecha.desc()).offset((pagina - 1) * por_pagina).limit(por_pagina).all()
+
+    items = []
+    for mov, bodega_nombre in rows:
+        lineas = mov.lineas
+        costo_total = sum(ln.costo_total for ln in lineas)
+        bodega_dest = db.get(InvBodega, mov.bodega_destino_id) if mov.bodega_destino_id else None
+        items.append(MovimientoListItem(
+            id=mov.id,
+            numero=mov.numero,
+            tipo=mov.tipo,
+            fecha=str(mov.fecha.date()) if hasattr(mov.fecha, "date") else str(mov.fecha),
+            bodega_id=mov.bodega_id,
+            bodega_nombre=bodega_nombre,
+            bodega_destino_nombre=bodega_dest.nombre if bodega_dest else None,
+            descripcion=mov.descripcion,
+            estado=mov.estado,
+            origen_tipo=mov.origen_tipo,
+            origen_id=mov.origen_id,
+            num_lineas=len(lineas),
+            costo_total=costo_total,
+        ))
+
+    return MovimientoListResponse(items=items, total=total, pagina=pagina, por_pagina=por_pagina)
+
+
+# ---------------------------------------------------------------------------
+# Detalle de movimiento
+# ---------------------------------------------------------------------------
+
+def obtener_movimiento(db, movimiento_id):
+    from app.models.inventario import InvMovimiento, InvBodega
+
+    mov = db.get(InvMovimiento, movimiento_id)
+    if not mov:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+
+    bodega = db.get(InvBodega, mov.bodega_id)
+    bodega_dest = db.get(InvBodega, mov.bodega_destino_id) if mov.bodega_destino_id else None
+
+    lineas = []
+    costo_total = Decimal("0")
+    for ln in mov.lineas:
+        p = ln.producto
+        um = ln.um
+        lineas.append(MovimientoLineaDetalle(
+            id=ln.id,
+            producto_id=ln.producto_id,
+            producto_codigo=p.codigo if p else "",
+            producto_nombre=p.nombre if p else "",
+            cantidad=ln.cantidad,
+            um_id=ln.um_id,
+            um_codigo=um.codigo if um else "",
+            costo_unitario=ln.costo_unitario,
+            costo_total=ln.costo_total,
+        ))
+        costo_total += ln.costo_total
+
+    return MovimientoDetalle(
+        id=mov.id,
+        numero=mov.numero,
+        tipo=mov.tipo,
+        fecha=str(mov.fecha.date()) if hasattr(mov.fecha, "date") else str(mov.fecha),
+        bodega_id=mov.bodega_id,
+        bodega_nombre=bodega.nombre if bodega else "",
+        bodega_destino_id=mov.bodega_destino_id,
+        bodega_destino_nombre=bodega_dest.nombre if bodega_dest else None,
+        descripcion=mov.descripcion,
+        estado=mov.estado,
+        origen_tipo=mov.origen_tipo,
+        origen_id=mov.origen_id,
+        asiento_id=mov.asiento_id,
+        lineas=lineas,
+        costo_total=costo_total,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Crear ajuste de inventario
+# ---------------------------------------------------------------------------
+
+def _aplicar_linea_movimiento(db, mov_id, linea, bodega_id, actor_id):
+    """Crea InvMovimientoLinea y retorna (cantidad_base, costo_unitario, costo_total, producto)."""
+    producto = db.get(InvProducto, linea.producto_id)
+    if not producto:
+        raise HTTPException(status_code=400, detail=f"Producto {linea.producto_id} no encontrado")
+
+    factor = Decimal("1")
+    pu = db.query(InvProductoUm).filter(
+        InvProductoUm.producto_id == linea.producto_id,
+        InvProductoUm.um_id == linea.um_id,
+    ).first()
+    if pu:
+        factor = pu.factor
+
+    cantidad_base = linea.cantidad * factor
+    costo_total_ln = cantidad_base * linea.costo_unitario
+
+    db.add(InvMovimientoLinea(
+        movimiento_id=mov_id,
+        producto_id=linea.producto_id,
+        cantidad=linea.cantidad,
+        um_id=linea.um_id,
+        cantidad_base=cantidad_base,
+        costo_unitario=linea.costo_unitario,
+        costo_total=costo_total_ln,
+    ))
+    return cantidad_base, linea.costo_unitario, costo_total_ln, producto
+
+
+def _get_or_create_pb(db, producto_id, bodega_id):
+    pb = db.query(InvProductoBodega).filter(
+        InvProductoBodega.producto_id == producto_id,
+        InvProductoBodega.bodega_id == bodega_id,
+    ).with_for_update().first()
+    if not pb:
+        pb = InvProductoBodega(producto_id=producto_id, bodega_id=bodega_id,
+                               cantidad=Decimal("0"), costo_promedio=Decimal("0"))
+        db.add(pb); db.flush()
+    return pb
+
+
+def _validar_stock(db, producto_id, bodega_id, um_id, cantidad):
+    """Lanza 400 si no hay suficiente stock. Retorna qty_base."""
+    factor = Decimal("1")
+    pu = db.query(InvProductoUm).filter(
+        InvProductoUm.producto_id == producto_id,
+        InvProductoUm.um_id == um_id,
+    ).first()
+    if pu:
+        factor = pu.factor
+    qty_b = cantidad * factor
+    pb = db.query(InvProductoBodega).filter(
+        InvProductoBodega.producto_id == producto_id,
+        InvProductoBodega.bodega_id == bodega_id,
+    ).first()
+    disponible = pb.cantidad if pb else Decimal("0")
+    if disponible < qty_b:
+        prod = db.get(InvProducto, producto_id)
+        nombre = prod.nombre if prod else str(producto_id)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Stock insuficiente para '{nombre}': disponible {disponible}, requerido {qty_b}",
+        )
+    return qty_b
+
+
+def _publicar_movimiento_interno(db, mov, actor_id):
+    """Aplica efectos de stock y contabilidad a un movimiento en borrador."""
+    from datetime import datetime as _dt
+    from app.schemas.inventario import MovimientoLineaCreate as MLC
+
+    es_traslado = mov.tipo in ("TRASLADO_SALIDA", "TRASLADO_ENTRADA")
+    fecha = mov.fecha.date() if hasattr(mov.fecha, "date") else mov.fecha
+
+    # Buscar movimiento de entrada asociado para traslado (mismo numero)
+    mov_ent = None
+    if mov.tipo == "TRASLADO_SALIDA" and mov.numero:
+        from app.models.inventario import InvMovimiento as _Mov
+        mov_ent = db.query(_Mov).filter(
+            _Mov.tipo == "TRASLADO_ENTRADA",
+            _Mov.numero == mov.numero,
+            _Mov.estado == "borrador",
+        ).first()
+
+    for ln in mov.lineas:
+        factor = Decimal("1")
+        pu = db.query(InvProductoUm).filter(
+            InvProductoUm.producto_id == ln.producto_id,
+            InvProductoUm.um_id == ln.um_id,
+        ).first()
+        if pu:
+            factor = pu.factor
+        qty_b = ln.cantidad_base
+
+        if mov.tipo == "TRASLADO_SALIDA":
+            # Validar y reducir origen
+            pb_orig = _get_or_create_pb(db, ln.producto_id, mov.bodega_id)
+            if pb_orig.cantidad < qty_b:
+                prod = db.get(InvProducto, ln.producto_id)
+                raise HTTPException(status_code=400,
+                    detail=f"Stock insuficiente para '{prod.nombre if prod else ln.producto_id}'")
+            pb_orig.cantidad -= qty_b
+            # Aumentar destino
+            pb_dest = _get_or_create_pb(db, ln.producto_id, mov.bodega_destino_id)
+            stock_ant = pb_dest.cantidad; costo_ant = pb_dest.costo_promedio
+            nueva_cant = stock_ant + qty_b
+            pb_dest.cantidad = nueva_cant
+            pb_dest.costo_promedio = (
+                (stock_ant * costo_ant + ln.costo_total) / nueva_cant if nueva_cant > 0 else ln.costo_unitario
+            )
+
+        elif mov.tipo == "AJUSTE_ENTRADA":
+            pb = _get_or_create_pb(db, ln.producto_id, mov.bodega_id)
+            stock_ant = pb.cantidad; costo_ant = pb.costo_promedio
+            nueva_cant = stock_ant + qty_b
+            pb.cantidad = nueva_cant
+            pb.costo_promedio = (
+                (stock_ant * costo_ant + ln.costo_total) / nueva_cant if nueva_cant > 0 else ln.costo_unitario
+            )
+
+        elif mov.tipo == "AJUSTE_SALIDA":
+            pb = _get_or_create_pb(db, ln.producto_id, mov.bodega_id)
+            if pb.cantidad < qty_b:
+                prod = db.get(InvProducto, ln.producto_id)
+                raise HTTPException(status_code=400,
+                    detail=f"Stock insuficiente para '{prod.nombre if prod else ln.producto_id}'")
+            pb.cantidad -= qty_b
+
+    mov.estado = "confirmado"
+    if mov_ent:
+        mov_ent.estado = "confirmado"
+
+    # Asiento contable (solo ajustes)
+    if mov.tipo in ("AJUSTE_ENTRADA", "AJUSTE_SALIDA"):
+        moneda_func = db.query(AdmMoneda).filter(AdmMoneda.es_funcional == True, AdmMoneda.activo == True).first()
+        costo_total_mov = sum(ln.costo_total for ln in mov.lineas)
+        if moneda_func and costo_total_mov > 0:
+            td = db.query(AdmTipoDocumento).filter(AdmTipoDocumento.codigo == "AJ").first()
+            td_id = td.id if td else None
+            numero = mov.numero
+            desc_as = mov.descripcion or f"Ajuste inventario {fecha}"
+            periodo = _buscar_periodo_inv(db, fecha)
+            asiento = CntAsiento(tipo_documento_id=td_id, documento_numero=numero,
+                fecha=fecha, periodo_id=periodo.id, descripcion=desc_as, estado="publicado",
+                moneda_id=moneda_func.id, documento_origen_id=mov.id,
+                documento_origen_tipo="inv_movimiento", creado_por=actor_id)
+            db.add(asiento); db.flush()
+            mov.asiento_id = asiento.id
+            orden = 1
+            for ln in mov.lineas:
+                prod = db.get(InvProducto, ln.producto_id)
+                if not prod:
+                    continue
+                cuenta_inv = _resolver_cuenta_inventario_inv(db, prod)
+                campo = "cuenta_ajuste_entrada_id" if mov.tipo == "AJUSTE_ENTRADA" else "cuenta_ajuste_salida_id"
+                cuenta_ajuste = _resolver_cuenta_ajuste(db, prod, campo)
+                if not cuenta_inv or not cuenta_ajuste or ln.costo_total == 0:
+                    continue
+                costo = ln.costo_total
+                if mov.tipo == "AJUSTE_ENTRADA":
+                    db.add(CntAsientoLinea(asiento_id=asiento.id, orden=orden, cuenta_id=cuenta_inv.id,
+                        descripcion=desc_as, debito=costo, credito=Decimal("0"),
+                        debito_funcional=costo, credito_funcional=Decimal("0")))
+                    orden += 1
+                    db.add(CntAsientoLinea(asiento_id=asiento.id, orden=orden, cuenta_id=cuenta_ajuste.id,
+                        descripcion=desc_as, debito=Decimal("0"), credito=costo,
+                        debito_funcional=Decimal("0"), credito_funcional=costo))
+                else:
+                    db.add(CntAsientoLinea(asiento_id=asiento.id, orden=orden, cuenta_id=cuenta_ajuste.id,
+                        descripcion=desc_as, debito=costo, credito=Decimal("0"),
+                        debito_funcional=costo, credito_funcional=Decimal("0")))
+                    orden += 1
+                    db.add(CntAsientoLinea(asiento_id=asiento.id, orden=orden, cuenta_id=cuenta_inv.id,
+                        descripcion=desc_as, debito=Decimal("0"), credito=costo,
+                        debito_funcional=Decimal("0"), credito_funcional=costo))
+                orden += 1
+
+
+def crear_movimiento(db, data, actor: UsuarioActual):
+    from datetime import datetime as _dt
+    from app.schemas.inventario import MovimientoLineaCreate as MLC
+
+    actor_id = actor.id
+    periodo = _buscar_periodo_inv(db, data.fecha)
+    es_traslado = data.tipo == "TRASLADO"
+
+    if es_traslado and not data.bodega_destino_id:
+        raise HTTPException(status_code=400, detail="El traslado requiere bodega destino")
+    if es_traslado and data.bodega_id == data.bodega_destino_id:
+        raise HTTPException(status_code=400, detail="Bodega origen y destino deben ser diferentes")
+
+    fecha_dt = _dt.combine(data.fecha, _dt.min.time())
+    desc = data.descripcion
+
+    if es_traslado:
+        _, numero_tr = _generar_numero(db, "TR")
+        mov_sal = InvMovimiento(tipo="TRASLADO_SALIDA", fecha=fecha_dt, periodo_id=periodo.id,
+            bodega_id=data.bodega_id, bodega_destino_id=data.bodega_destino_id,
+            numero=numero_tr, descripcion=desc, estado="borrador", origen_tipo="traslado_manual", creado_por=actor_id)
+        mov_ent = InvMovimiento(tipo="TRASLADO_ENTRADA", fecha=fecha_dt, periodo_id=periodo.id,
+            bodega_id=data.bodega_destino_id, bodega_destino_id=data.bodega_id,
+            numero=numero_tr, descripcion=desc, estado="borrador", origen_tipo="traslado_manual", creado_por=actor_id)
+        db.add(mov_sal); db.add(mov_ent); db.flush()
+
+        for linea in data.lineas:
+            pb_orig = db.query(InvProductoBodega).filter(
+                InvProductoBodega.producto_id == linea.producto_id,
+                InvProductoBodega.bodega_id == data.bodega_id,
+            ).first()
+            costo_unit = (pb_orig.costo_promedio if pb_orig and pb_orig.costo_promedio > 0 else linea.costo_unitario)
+
+            linea_con_costo = MLC(
+                producto_id=linea.producto_id, cantidad=linea.cantidad,
+                um_id=linea.um_id, costo_unitario=costo_unit,
+            )
+            _aplicar_linea_movimiento(db, mov_sal.id, linea_con_costo, data.bodega_id, actor_id)
+            _aplicar_linea_movimiento(db, mov_ent.id, linea_con_costo, data.bodega_destino_id, actor_id)
+
+        db.flush()
+        db.expire(mov_sal)
+
+        if data.publicar:
+            _publicar_movimiento_interno(db, mov_sal, actor_id)
+
+        db.commit()
+        db.refresh(mov_sal)
+        return obtener_movimiento(db, mov_sal.id)
+
+    # Ajuste entrada / salida
+    _, numero_aj = _generar_numero(db, "AJ")
+    mov = InvMovimiento(tipo=data.tipo, fecha=fecha_dt, periodo_id=periodo.id,
+        bodega_id=data.bodega_id, numero=numero_aj, descripcion=desc,
+        estado="borrador", origen_tipo="ajuste_manual", creado_por=actor_id)
+    db.add(mov); db.flush()
+
+    for linea in data.lineas:
+        _aplicar_linea_movimiento(db, mov.id, linea, data.bodega_id, actor_id)
+
+    db.flush()
+    db.expire(mov)
+
+    if data.publicar:
+        _publicar_movimiento_interno(db, mov, actor_id)
+
+    db.commit(); db.refresh(mov)
+    return obtener_movimiento(db, mov.id)
+
+
+def publicar_movimiento(db, movimiento_id, actor: UsuarioActual):
+    mov = db.get(InvMovimiento, movimiento_id)
+    if not mov:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+    if mov.estado != "borrador":
+        raise HTTPException(status_code=400, detail=f"El movimiento ya está en estado '{mov.estado}'")
+    _publicar_movimiento_interno(db, mov, actor.id)
+    db.commit(); db.refresh(mov)
+    return obtener_movimiento(db, mov.id)
+
+
+def editar_movimiento(db, movimiento_id: uuid.UUID, data: "MovimientoManualCreate", actor: "UsuarioActual"):
+    from app.schemas.inventario import MovimientoManualCreate  # evitar import circular
+    mov = db.get(InvMovimiento, movimiento_id)
+    if not mov:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+    if mov.estado != "borrador":
+        raise HTTPException(status_code=400, detail="Solo se pueden editar movimientos en borrador")
+
+    from datetime import datetime as _dt
+
+    periodo = _buscar_periodo_inv(db, data.fecha)
+
+    # Determinar tipo real según selección del usuario
+    es_traslado = data.tipo == "TRASLADO"
+
+    # Borrar líneas existentes
+    db.query(InvMovimientoLinea).filter(InvMovimientoLinea.movimiento_id == mov.id).delete()
+
+    # Actualizar cabecera
+    fecha_dt = _dt.combine(data.fecha, _dt.min.time())
+    mov.fecha = fecha_dt
+    mov.periodo_id = periodo.id
+    mov.bodega_id = data.bodega_id
+    mov.bodega_destino_id = data.bodega_destino_id
+    mov.descripcion = data.descripcion
+    db.flush()
+
+    # Si es traslado, también actualizar el movimiento de entrada vinculado
+    if es_traslado or mov.tipo in ("TRASLADO_SALIDA", "TRASLADO_ENTRADA"):
+        mov_ent = (
+            db.query(InvMovimiento)
+            .filter(
+                InvMovimiento.numero == mov.numero,
+                InvMovimiento.tipo == "TRASLADO_ENTRADA",
+                InvMovimiento.id != mov.id,
+            )
+            .first()
+        )
+        if mov_ent:
+            db.query(InvMovimientoLinea).filter(InvMovimientoLinea.movimiento_id == mov_ent.id).delete()
+            mov_ent.fecha = fecha_dt
+            mov_ent.periodo_id = periodo.id
+            mov_ent.bodega_id = data.bodega_destino_id
+            mov_ent.bodega_destino_id = data.bodega_id
+            mov_ent.descripcion = data.descripcion
+            db.flush()
+
+            # Re-crear líneas entrada
+            for linea in data.lineas:
+                if linea.producto_id and linea.cantidad > 0:
+                    linea_con_costo = type(linea)(
+                        producto_id=linea.producto_id,
+                        cantidad=linea.cantidad,
+                        um_id=linea.um_id,
+                        costo_unitario=linea.costo_unitario,
+                    )
+                    _aplicar_linea_movimiento(db, mov_ent.id, linea_con_costo, data.bodega_destino_id, actor.id)
+
+    # Re-crear líneas del movimiento principal
+    for linea in data.lineas:
+        if linea.producto_id and linea.cantidad > 0:
+            _aplicar_linea_movimiento(db, mov.id, linea, data.bodega_id, actor.id)
+
+    db.flush()
+    db.expire(mov)
+
+    if data.publicar:
+        _publicar_movimiento_interno(db, mov, actor.id)
+
+    db.commit()
+    db.refresh(mov)
+    return obtener_movimiento(db, mov.id)
+
+
+def crear_ajuste(db, data, actor: UsuarioActual):
+    return crear_movimiento(db, data, actor)
+

@@ -11,7 +11,7 @@ from app.schemas.consecutivos import ConsecutivoCreate, ConsecutivoUpdate, Conse
 MODULO_ORDEN = ["administracion", "contabilidad", "facturacion", "cxc", "cxp", "compras", "bancos"]
 
 # Códigos sembrados por el sistema — no se pueden eliminar
-CODIGOS_SISTEMA = {"AM", "ANU", "AJU", "DEP", "NOM", "ANT", "ANTP", "COT", "CP", "FAC", "FCP", "NCC", "NDB", "OC", "REC", "REM"}
+CODIGOS_SISTEMA = {"AM", "ANU", "AJU", "DEP", "NOM", "ANT", "ANTP", "COT", "CP", "FAC", "FCP", "NCC", "NDB", "OC", "REC", "RECP", "RM", "AJ", "TR"}
 
 
 def _ejemplo(obj: AdmConsecutivo) -> str:

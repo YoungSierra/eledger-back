@@ -1,13 +1,21 @@
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
+from io import BytesIO
 import uuid as _uuid
 
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
 from app.models.adm import AdmTercero
+from app.models.admin import AdmEmpresa
 from app.models.contabilidad import CntAsiento, CntAsientoLinea, CntCuenta
+from app.models.inventario import InvProductoBodega, InvProducto, InvBodega, InvFamilia
+from app.models.compras import ComOrdenCompra, ComOcLinea
+from app.models.facturacion import FacFactura, FacFacturaLinea
 
 
 def balanza_comprobacion(
@@ -1081,3 +1089,330 @@ def balanza_excel(db: Session, fecha_desde: date, fecha_hasta: date, nivel: int 
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Inventario valorado
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _empresa_nombre(db: Session) -> str:
+    emp = db.query(AdmEmpresa).first()
+    return emp.razon_social if emp else ""
+
+
+def inventario_valorado(
+    db: Session,
+    fecha_corte: date,
+    bodega_id: _uuid.UUID | None = None,
+    familia_id: _uuid.UUID | None = None,
+) -> dict:
+    CERO = Decimal("0")
+    q = (
+        db.query(InvProductoBodega)
+        .join(InvProductoBodega.producto)
+        .join(InvProductoBodega.bodega)
+        .filter(InvProductoBodega.cantidad > CERO)
+    )
+    if bodega_id:
+        q = q.filter(InvProductoBodega.bodega_id == bodega_id)
+    if familia_id:
+        q = q.filter(InvProducto.familia_id == familia_id)
+
+    rows = q.order_by(InvBodega.nombre, InvProducto.codigo).all()
+
+    grupos: dict[str, dict] = {}
+    gran_total = CERO
+
+    for pb in rows:
+        p   = pb.producto
+        b   = pb.bodega
+        fam = p.familia.nombre if p.familia else "Sin familia"
+        valor = pb.cantidad * pb.costo_promedio
+
+        key = b.nombre
+        if key not in grupos:
+            grupos[key] = {"bodega_id": str(b.id), "bodega": b.nombre, "lineas": [], "subtotal": CERO}
+        grupos[key]["lineas"].append({
+            "producto_codigo": p.codigo,
+            "producto_nombre": p.nombre,
+            "familia":         fam,
+            "um":              p.um_base.codigo if p.um_base else "",
+            "cantidad":        str(pb.cantidad),
+            "costo_promedio":  str(pb.costo_promedio),
+            "valor_total":     str(valor),
+        })
+        grupos[key]["subtotal"] += valor
+        gran_total += valor
+
+    for g in grupos.values():
+        g["subtotal"] = str(g["subtotal"])
+
+    return {
+        "empresa":     _empresa_nombre(db),
+        "fecha_corte": str(fecha_corte),
+        "grupos":      list(grupos.values()),
+        "gran_total":  str(gran_total),
+    }
+
+
+def inventario_valorado_excel(
+    db: Session,
+    fecha_corte: date,
+    bodega_id: _uuid.UUID | None = None,
+    familia_id: _uuid.UUID | None = None,
+) -> StreamingResponse:
+    data = inventario_valorado(db, fecha_corte, bodega_id, familia_id)
+
+    from io import BytesIO as _BytesIO
+    import openpyxl as _xl
+    from openpyxl.styles import Font as _Font, Alignment as _Align, PatternFill as _Fill, Border as _Border, Side as _Side
+
+    wb = _xl.Workbook()
+    ws = wb.active
+    ws.title = "Inventario valorado"
+
+    _HDR_FILL = _Fill("solid", fgColor="1e3a5f")
+    _GRP_FILL = _Fill("solid", fgColor="dbeafe")
+    _SUB_FILL = _Fill("solid", fgColor="eff6ff")
+    _TOT_FILL = _Fill("solid", fgColor="1e3a5f")
+    _THIN     = _Side(style="thin", color="d1d5db")
+    _BORD     = _Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+    _R = _Align(horizontal="right")
+
+    ws.merge_cells("A1:G1")
+    ws["A1"].value = data["empresa"]; ws["A1"].font = _Font(bold=True, size=13)
+    ws.merge_cells("A2:G2")
+    ws["A2"].value = f"Inventario valorado al {data['fecha_corte']}"; ws["A2"].font = _Font(bold=True, size=11)
+    ws.append([])
+
+    ws.append(["Código", "Producto", "Familia", "UM", "Cantidad", "Costo prom.", "Valor total"])
+    for cell in ws[ws.max_row]:
+        cell.font = _Font(bold=True, color="FFFFFF")
+        cell.fill = _HDR_FILL; cell.border = _BORD
+
+    for grupo in data["grupos"]:
+        ws.append([grupo["bodega"]])
+        r = ws.max_row
+        ws.merge_cells(f"A{r}:G{r}")
+        for cell in ws[r]: cell.fill = _GRP_FILL; cell.font = _Font(bold=True, color="1e40af"); cell.border = _BORD
+
+        for ln in grupo["lineas"]:
+            ws.append([
+                ln["producto_codigo"], ln["producto_nombre"], ln["familia"], ln["um"],
+                float(ln["cantidad"]), float(ln["costo_promedio"]), float(ln["valor_total"]),
+            ])
+            for cell in ws[ws.max_row]: cell.border = _BORD
+            for cell in ws[ws.max_row][4:]:
+                cell.alignment = _R
+                cell.number_format = '#,##0.0000' if cell.column <= 5 else '#,##0.00'
+
+        ws.append(["", f"Subtotal {grupo['bodega']}", "", "", "", "", float(grupo["subtotal"])])
+        for cell in ws[ws.max_row]: cell.fill = _SUB_FILL; cell.font = _Font(bold=True); cell.border = _BORD
+        ws[f"G{ws.max_row}"].alignment = _R; ws[f"G{ws.max_row}"].number_format = '#,##0.00'
+
+    ws.append(["", "TOTAL INVENTARIO", "", "", "", "", float(data["gran_total"])])
+    for cell in ws[ws.max_row]:
+        cell.fill = _TOT_FILL; cell.font = _Font(bold=True, color="FFFFFF"); cell.border = _BORD
+    ws[f"G{ws.max_row}"].alignment = _R; ws[f"G{ws.max_row}"].number_format = '#,##0.00'
+
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 38
+    ws.column_dimensions["C"].width = 20
+    ws.column_dimensions["D"].width = 8
+    ws.column_dimensions["E"].width = 14
+    ws.column_dimensions["F"].width = 16
+    ws.column_dimensions["G"].width = 18
+
+    buf = _BytesIO()
+    wb.save(buf); buf.seek(0)
+    filename = f"inventario_valorado_{fecha_corte}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers comunes agrupacion
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pct(valor, total):
+    if total == 0:
+        return "0.00"
+    return str((valor / total * 100).quantize(Decimal("0.01")))
+
+
+def _excel_agrupacion(data: dict, titulo: str, filename: str):
+    from io import BytesIO as _B
+    import openpyxl as _xl
+    from openpyxl.styles import Font as _F, Alignment as _A, PatternFill as _P, Border as _Bd, Side as _S
+
+    wb = _xl.Workbook(); ws = wb.active; ws.title = titulo[:31]
+    _HDR = _P("solid", fgColor="1e3a5f")
+    _THIN = _S(style="thin", color="d1d5db"); _BORD = _Bd(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+    _R = _A(horizontal="right")
+
+    ws.merge_cells("A1:F1"); ws["A1"].value = data["empresa"]; ws["A1"].font = _F(bold=True, size=13)
+    ws.merge_cells("A2:F2"); ws["A2"].value = f"{titulo} del {data['fecha_desde']} al {data['fecha_hasta']}"; ws["A2"].font = _F(bold=True, size=11)
+    ws.merge_cells("A3:F3"); ws["A3"].value = f"Agrupado por: {data['agrupar_por']}"; ws["A3"].font = _F(italic=True, size=9)
+    ws.append([])
+
+    ws.append([data["agrupar_por"].capitalize(), "Cantidad", "Subtotal", "IVA", "Total", "% del total"])
+    for cell in ws[ws.max_row]:
+        cell.font = _F(bold=True, color="FFFFFF"); cell.fill = _HDR; cell.border = _BORD
+
+    for f in data["filas"]:
+        ws.append([f["nombre"], float(f.get("cantidad", 0)), float(f["subtotal"]), float(f["total_iva"]), float(f["total"]), float(f["pct_total"])])
+        for cell in ws[ws.max_row]: cell.border = _BORD
+        for cell in ws[ws.max_row][1:]: cell.alignment = _R; cell.number_format = "#,##0.00"
+
+    ws.append(["TOTAL", "", float(data["gran_subtotal"]), float(data["gran_iva"]), float(data["gran_total"]), "100.00"])
+    for cell in ws[ws.max_row]:
+        cell.fill = _HDR; cell.font = _F(bold=True, color="FFFFFF"); cell.border = _BORD
+        cell.alignment = _R if cell.column > 1 else _A(); cell.number_format = "#,##0.00"
+
+    ws.column_dimensions["A"].width = 40
+    for col in ["B", "C", "D", "E", "F"]: ws.column_dimensions[col].width = 16
+
+    buf = _B(); wb.save(buf); buf.seek(0)
+    from fastapi.responses import StreamingResponse as _SR
+    return _SR(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+               headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ventas por agrupacion
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ventas_agrupacion(db, fecha_desde, fecha_hasta, agrupar_por="cliente"):
+    CERO = Decimal("0")
+    filas = []; gran_sub = CERO; gran_iva = CERO; gran_tot = CERO
+
+    if agrupar_por == "cliente":
+        rows = (
+            db.query(AdmTercero.id, AdmTercero.nit, AdmTercero.razon_social,
+                     func.sum(FacFactura.subtotal), func.sum(FacFactura.total_iva), func.sum(FacFactura.total))
+            .join(FacFactura, FacFactura.cliente_id == AdmTercero.id)
+            .filter(FacFactura.estado == "contabilizada", FacFactura.fecha >= fecha_desde, FacFactura.fecha <= fecha_hasta)
+            .group_by(AdmTercero.id, AdmTercero.nit, AdmTercero.razon_social)
+            .order_by(func.sum(FacFactura.total).desc()).all()
+        )
+        for tid, nit, nombre, sub, iva, tot in rows:
+            sub = sub or CERO; iva = iva or CERO; tot = tot or CERO
+            gran_sub += sub; gran_iva += iva; gran_tot += tot
+            filas.append({"id": str(tid), "identificador": nit or "", "nombre": nombre, "cantidad": "0", "subtotal": str(sub), "total_iva": str(iva), "total": str(tot), "pct_total": "0"})
+
+    elif agrupar_por == "producto":
+        rows = (
+            db.query(InvProducto.id, InvProducto.codigo, InvProducto.nombre,
+                     func.sum(FacFacturaLinea.cantidad), func.sum(FacFacturaLinea.subtotal),
+                     func.sum(FacFacturaLinea.total_iva), func.sum(FacFacturaLinea.total))
+            .join(FacFacturaLinea, FacFacturaLinea.producto_id == InvProducto.id)
+            .join(FacFactura, FacFactura.id == FacFacturaLinea.factura_id)
+            .filter(FacFactura.estado == "contabilizada", FacFactura.fecha >= fecha_desde, FacFactura.fecha <= fecha_hasta)
+            .group_by(InvProducto.id, InvProducto.codigo, InvProducto.nombre)
+            .order_by(func.sum(FacFacturaLinea.total).desc()).all()
+        )
+        for pid, cod, nombre, qty, sub, iva, tot in rows:
+            qty = qty or CERO; sub = sub or CERO; iva = iva or CERO; tot = tot or CERO
+            gran_sub += sub; gran_iva += iva; gran_tot += tot
+            filas.append({"id": str(pid), "identificador": cod, "nombre": nombre, "cantidad": str(qty), "subtotal": str(sub), "total_iva": str(iva), "total": str(tot), "pct_total": "0"})
+
+    else:  # familia
+        rows = (
+            db.query(InvFamilia.id, InvFamilia.nombre,
+                     func.sum(FacFacturaLinea.cantidad), func.sum(FacFacturaLinea.subtotal),
+                     func.sum(FacFacturaLinea.total_iva), func.sum(FacFacturaLinea.total))
+            .join(InvProducto, InvProducto.id == FacFacturaLinea.producto_id)
+            .join(InvFamilia, InvFamilia.id == InvProducto.familia_id)
+            .join(FacFactura, FacFactura.id == FacFacturaLinea.factura_id)
+            .filter(FacFactura.estado == "contabilizada", FacFactura.fecha >= fecha_desde, FacFactura.fecha <= fecha_hasta)
+            .group_by(InvFamilia.id, InvFamilia.nombre)
+            .order_by(func.sum(FacFacturaLinea.total).desc()).all()
+        )
+        for fid, nombre, qty, sub, iva, tot in rows:
+            qty = qty or CERO; sub = sub or CERO; iva = iva or CERO; tot = tot or CERO
+            gran_sub += sub; gran_iva += iva; gran_tot += tot
+            filas.append({"id": str(fid), "identificador": "", "nombre": nombre, "cantidad": str(qty), "subtotal": str(sub), "total_iva": str(iva), "total": str(tot), "pct_total": "0"})
+
+    for f in filas:
+        f["pct_total"] = _pct(Decimal(f["total"]), gran_tot)
+
+    return {"empresa": _empresa_nombre(db), "fecha_desde": str(fecha_desde), "fecha_hasta": str(fecha_hasta),
+            "agrupar_por": agrupar_por, "filas": filas,
+            "gran_subtotal": str(gran_sub), "gran_iva": str(gran_iva), "gran_total": str(gran_tot)}
+
+
+def ventas_agrupacion_excel(db, fecha_desde, fecha_hasta, agrupar_por):
+    return _excel_agrupacion(ventas_agrupacion(db, fecha_desde, fecha_hasta, agrupar_por),
+                             "Ventas por agrupacion", f"ventas_{agrupar_por}_{fecha_desde}_{fecha_hasta}.xlsx")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Compras por agrupacion (OC, estado != borrador)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compras_agrupacion(db, fecha_desde, fecha_hasta, agrupar_por="proveedor"):
+    CERO = Decimal("0")
+    filas = []; gran_sub = CERO; gran_iva = CERO; gran_tot = CERO
+
+    if agrupar_por == "proveedor":
+        rows = (
+            db.query(AdmTercero.id, AdmTercero.nit, AdmTercero.razon_social,
+                     func.sum(ComOrdenCompra.subtotal), func.sum(ComOrdenCompra.total_iva), func.sum(ComOrdenCompra.total))
+            .join(ComOrdenCompra, ComOrdenCompra.proveedor_id == AdmTercero.id)
+            .filter(ComOrdenCompra.estado != "borrador", ComOrdenCompra.fecha >= fecha_desde, ComOrdenCompra.fecha <= fecha_hasta)
+            .group_by(AdmTercero.id, AdmTercero.nit, AdmTercero.razon_social)
+            .order_by(func.sum(ComOrdenCompra.total).desc()).all()
+        )
+        for tid, nit, nombre, sub, iva, tot in rows:
+            sub = sub or CERO; iva = iva or CERO; tot = tot or CERO
+            gran_sub += sub; gran_iva += iva; gran_tot += tot
+            filas.append({"id": str(tid), "identificador": nit or "", "nombre": nombre, "cantidad": "0", "subtotal": str(sub), "total_iva": str(iva), "total": str(tot), "pct_total": "0"})
+
+    elif agrupar_por == "producto":
+        rows = (
+            db.query(InvProducto.id, InvProducto.codigo, InvProducto.nombre,
+                     func.sum(ComOcLinea.cantidad), func.sum(ComOcLinea.subtotal),
+                     func.sum(ComOcLinea.total_iva), func.sum(ComOcLinea.total))
+            .join(ComOcLinea, ComOcLinea.producto_id == InvProducto.id)
+            .join(ComOrdenCompra, ComOrdenCompra.id == ComOcLinea.oc_id)
+            .filter(ComOrdenCompra.estado != "borrador", ComOrdenCompra.fecha >= fecha_desde, ComOrdenCompra.fecha <= fecha_hasta)
+            .group_by(InvProducto.id, InvProducto.codigo, InvProducto.nombre)
+            .order_by(func.sum(ComOcLinea.total).desc()).all()
+        )
+        for pid, cod, nombre, qty, sub, iva, tot in rows:
+            qty = qty or CERO; sub = sub or CERO; iva = iva or CERO; tot = tot or CERO
+            gran_sub += sub; gran_iva += iva; gran_tot += tot
+            filas.append({"id": str(pid), "identificador": cod, "nombre": nombre, "cantidad": str(qty), "subtotal": str(sub), "total_iva": str(iva), "total": str(tot), "pct_total": "0"})
+
+    else:  # familia
+        rows = (
+            db.query(InvFamilia.id, InvFamilia.nombre,
+                     func.sum(ComOcLinea.cantidad), func.sum(ComOcLinea.subtotal),
+                     func.sum(ComOcLinea.total_iva), func.sum(ComOcLinea.total))
+            .join(InvProducto, InvProducto.id == ComOcLinea.producto_id)
+            .join(InvFamilia, InvFamilia.id == InvProducto.familia_id)
+            .join(ComOrdenCompra, ComOrdenCompra.id == ComOcLinea.oc_id)
+            .filter(ComOrdenCompra.estado != "borrador", ComOrdenCompra.fecha >= fecha_desde, ComOrdenCompra.fecha <= fecha_hasta)
+            .group_by(InvFamilia.id, InvFamilia.nombre)
+            .order_by(func.sum(ComOcLinea.total).desc()).all()
+        )
+        for fid, nombre, qty, sub, iva, tot in rows:
+            qty = qty or CERO; sub = sub or CERO; iva = iva or CERO; tot = tot or CERO
+            gran_sub += sub; gran_iva += iva; gran_tot += tot
+            filas.append({"id": str(fid), "identificador": "", "nombre": nombre, "cantidad": str(qty), "subtotal": str(sub), "total_iva": str(iva), "total": str(tot), "pct_total": "0"})
+
+    for f in filas:
+        f["pct_total"] = _pct(Decimal(f["total"]), gran_tot)
+
+    return {"empresa": _empresa_nombre(db), "fecha_desde": str(fecha_desde), "fecha_hasta": str(fecha_hasta),
+            "agrupar_por": agrupar_por, "filas": filas,
+            "gran_subtotal": str(gran_sub), "gran_iva": str(gran_iva), "gran_total": str(gran_tot)}
+
+
+def compras_agrupacion_excel(db, fecha_desde, fecha_hasta, agrupar_por):
+    return _excel_agrupacion(compras_agrupacion(db, fecha_desde, fecha_hasta, agrupar_por),
+                             "Compras por agrupacion", f"compras_{agrupar_por}_{fecha_desde}_{fecha_hasta}.xlsx")
+

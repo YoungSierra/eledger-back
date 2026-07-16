@@ -25,6 +25,17 @@ class PeriodoCreate(BaseModel):
         return self
 
 
+class GenerarAnioRequest(BaseModel):
+    anio: int
+
+    @field_validator("anio")
+    @classmethod
+    def anio_valido(cls, v: int) -> int:
+        if not 2000 <= v <= 2100:
+            raise ValueError("Año fuera de rango")
+        return v
+
+
 class PeriodoUpdate(BaseModel):
     fecha_inicio: date
     fecha_cierre: date
