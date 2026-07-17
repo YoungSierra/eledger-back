@@ -9,7 +9,7 @@ from app.schemas.auth import UsuarioActual
 from app.schemas.centros_costo import CentroCostoCreate, CentroCostoUpdate
 
 
-def listar(db: Session, padre_id: uuid.UUID | None = None, solo_activos: bool = True, busqueda: str | None = None) -> list[CntCentroCosto]:
+def listar(db: Session, padre_id: uuid.UUID | None = None, solo_activos: bool = True, busqueda: str | None = None, plano: bool = False) -> list[CntCentroCosto]:
     q = db.query(CntCentroCosto)
     if solo_activos:
         q = q.filter(CntCentroCosto.activo == True)
@@ -18,6 +18,9 @@ def listar(db: Session, padre_id: uuid.UUID | None = None, solo_activos: bool = 
         return q.filter(
             (CntCentroCosto.codigo.ilike(term)) | (CntCentroCosto.nombre.ilike(term))
         ).order_by(CntCentroCosto.codigo).limit(100).all()
+    if plano:
+        # Lista completa (todos los niveles) para selectores de transacciones.
+        return q.order_by(CntCentroCosto.codigo).all()
     if padre_id is not None:
         q = q.filter(CntCentroCosto.padre_id == padre_id)
     else:

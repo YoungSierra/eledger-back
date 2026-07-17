@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.models.adm import AdmTercero
 from app.models.admin import AdmEmpresa
-from app.models.contabilidad import CntAsiento, CntAsientoLinea, CntCuenta
+from app.models.contabilidad import CntAsiento, CntAsientoLinea, CntCuenta, CntCentroCosto
 from app.models.inventario import InvProductoBodega, InvProducto, InvBodega, InvFamilia
 from app.models.compras import ComOrdenCompra, ComOcLinea
 from app.models.facturacion import FacFactura, FacFacturaLinea
@@ -618,6 +618,171 @@ def auxiliar_excel(
     buf = BytesIO()
     wb.save(buf); buf.seek(0)
     fn = f"auxiliar_{cuenta_desde}_{cuenta_hasta}_{fecha_desde}_{fecha_hasta}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fn}"'},
+    )
+
+
+def auxiliar_centro_costo(
+    db: Session,
+    cuenta_desde: str | None,
+    cuenta_hasta: str | None,
+    fecha_desde: date,
+    fecha_hasta: date,
+    centro_costo_id: str | None = None,
+    incluir_hijos: bool = False,
+) -> dict:
+    """Auxiliar como tabla plana de movimientos, con cuenta y centro de costo por fila.
+
+    Si `incluir_hijos` es True y hay un centro seleccionado, el filtro abarca ese
+    centro y todos sus descendientes; si es False, solo el centro exacto.
+    """
+    CERO = Decimal("0")
+
+    cc_id = _uuid.UUID(centro_costo_id) if centro_costo_id else None
+
+    # Conjunto de centros a filtrar: el seleccionado + descendientes si se pide.
+    cc_ids_filtro: list | None = None
+    if cc_id:
+        if incluir_hijos:
+            hijos_de: dict = defaultdict(list)
+            for r in db.query(CntCentroCosto.id, CntCentroCosto.padre_id).all():
+                hijos_de[r.padre_id].append(r.id)
+            cc_ids_filtro, pila = [], [cc_id]
+            while pila:
+                actual = pila.pop()
+                cc_ids_filtro.append(actual)
+                pila.extend(hijos_de.get(actual, []))
+        else:
+            cc_ids_filtro = [cc_id]
+
+    q = (
+        db.query(
+            CntAsiento.fecha,
+            CntAsiento.numero,
+            CntCuenta.codigo.label("cuenta_codigo"),
+            CntCuenta.nombre.label("cuenta_nombre"),
+            CntCentroCosto.codigo.label("cc_codigo"),
+            CntCentroCosto.nombre.label("cc_nombre"),
+            CntAsientoLinea.descripcion.label("linea_desc"),
+            CntAsiento.descripcion.label("asiento_desc"),
+            CntAsientoLinea.debito_funcional,
+            CntAsientoLinea.credito_funcional,
+            CntAsientoLinea.orden,
+        )
+        .join(CntAsiento, CntAsientoLinea.asiento_id == CntAsiento.id)
+        .join(CntCuenta, CntAsientoLinea.cuenta_id == CntCuenta.id)
+        .outerjoin(CntCentroCosto, CntAsientoLinea.centro_costo_id == CntCentroCosto.id)
+        .filter(
+            CntAsiento.estado == "publicado",
+            CntAsientoLinea.activo == True,
+            CntAsiento.fecha >= fecha_desde,
+            CntAsiento.fecha <= fecha_hasta,
+        )
+    )
+    if cuenta_desde:
+        q = q.filter(CntCuenta.codigo >= cuenta_desde)
+    if cuenta_hasta:
+        q = q.filter(CntCuenta.codigo <= cuenta_hasta)
+    if cc_ids_filtro is not None:
+        q = q.filter(CntAsientoLinea.centro_costo_id.in_(cc_ids_filtro))
+    q = q.order_by(CntAsiento.fecha, CntAsiento.numero, CntCuenta.codigo, CntAsientoLinea.orden)
+
+    movimientos = []
+    tot_deb = tot_cred = CERO
+    for r in q.all():
+        deb  = Decimal(str(r.debito_funcional  or 0))
+        cred = Decimal(str(r.credito_funcional or 0))
+        tot_deb  += deb
+        tot_cred += cred
+        movimientos.append({
+            "fecha":               str(r.fecha),
+            "numero":              r.numero,
+            "cuenta_codigo":       r.cuenta_codigo,
+            "cuenta_nombre":       r.cuenta_nombre,
+            "centro_costo_codigo": r.cc_codigo or "",
+            "centro_costo_nombre": r.cc_nombre or "Sin centro de costo",
+            "descripcion":         r.linea_desc or r.asiento_desc or "",
+            "debito":              str(deb),
+            "credito":             str(cred),
+        })
+
+    return {
+        "fecha_desde":  str(fecha_desde),
+        "fecha_hasta":  str(fecha_hasta),
+        "cuenta_desde": cuenta_desde,
+        "cuenta_hasta": cuenta_hasta,
+        "movimientos":  movimientos,
+        "totales": {
+            "debito":  str(tot_deb),
+            "credito": str(tot_cred),
+        },
+    }
+
+
+def auxiliar_cc_excel(
+    db: Session,
+    cuenta_desde: str | None,
+    cuenta_hasta: str | None,
+    fecha_desde: date,
+    fecha_hasta: date,
+    centro_costo_id: str | None = None,
+    incluir_hijos: bool = False,
+):
+    data = auxiliar_centro_costo(db, cuenta_desde, cuenta_hasta, fecha_desde, fecha_hasta, centro_costo_id, incluir_hijos)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Auxiliar Centros Costo"
+
+    thin  = Side(style="thin", color="CCCCCC")
+    brd   = Border(left=thin, right=thin, top=thin, bottom=thin)
+    num   = '#,##0.00'
+    right = Alignment(horizontal="right")
+    fill_h = PatternFill(fill_type="solid", fgColor="1F4E79")
+    fill_s = PatternFill(fill_type="solid", fgColor="EEEEEE")
+
+    ws.merge_cells("A1:H1")
+    ws["A1"] = f"Auxiliar por Centro de Costo — {fecha_desde} a {fecha_hasta}"
+    ws["A1"].font = Font(bold=True, size=13)
+
+    HDR = ["Fecha", "N° Asiento", "Cuenta", "Cuenta nombre", "Centro de costo", "Descripción", "Débito", "Crédito"]
+    row = 3
+    for ci, h in enumerate(HDR, 1):
+        cel = ws.cell(row=row, column=ci, value=h)
+        cel.font = Font(bold=True, size=9, color="FFFFFF")
+        cel.fill = fill_h; cel.border = brd
+        cel.alignment = right if ci >= 7 else Alignment(horizontal="left")
+    row += 1
+
+    for i, m in enumerate(data["movimientos"]):
+        bg = None if i % 2 == 0 else PatternFill(fill_type="solid", fgColor="F7F7F7")
+        cc = f"{m['centro_costo_codigo']} {m['centro_costo_nombre']}".strip() if m["centro_costo_codigo"] else m["centro_costo_nombre"]
+        vals = [m["fecha"], m["numero"], m["cuenta_codigo"], m["cuenta_nombre"], cc,
+                m["descripcion"], float(m["debito"]) or None, float(m["credito"]) or None]
+        for ci, val in enumerate(vals, 1):
+            cel = ws.cell(row=row, column=ci, value=val)
+            cel.border = brd
+            if ci >= 7:
+                cel.number_format = num; cel.alignment = right
+            if bg:
+                cel.fill = bg
+        row += 1
+
+    tots = data["totales"]
+    ws.cell(row=row, column=6, value="TOTALES").font = Font(bold=True)
+    for ci, val in [(7, tots["debito"]), (8, tots["credito"])]:
+        cel = ws.cell(row=row, column=ci, value=float(val))
+        cel.font = Font(bold=True); cel.number_format = num
+        cel.alignment = right; cel.fill = fill_s; cel.border = brd
+
+    for col, w in zip(["A","B","C","D","E","F","G","H"], [12, 12, 12, 30, 26, 40, 16, 16]):
+        ws.column_dimensions[col].width = w
+
+    buf = BytesIO()
+    wb.save(buf); buf.seek(0)
+    fn = f"auxiliar_cc_{cuenta_desde}_{cuenta_hasta}_{fecha_desde}_{fecha_hasta}.xlsx"
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

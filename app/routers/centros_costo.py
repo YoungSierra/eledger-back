@@ -18,10 +18,11 @@ def listar(
     padre_id: Optional[uuid.UUID] = Query(None),
     busqueda: Optional[str] = Query(None),
     solo_activos: bool = Query(True),
+    plano: bool = Query(False),
     db: Session = Depends(get_db),
     actor: UsuarioActual = Depends(require_permission("contabilidad", "ver")),
 ):
-    return centro_costo_service.listar(db, padre_id, solo_activos, busqueda)
+    return centro_costo_service.listar(db, padre_id, solo_activos, busqueda, plano)
 
 
 @router.post("", response_model=CentroCostoResponse, status_code=201)

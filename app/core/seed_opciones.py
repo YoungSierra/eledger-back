@@ -82,6 +82,7 @@ OPCIONES = [
     ("reportes", "balanza",         "Balanza de comprobación", "/dashboard/reportes/balanza",       6, True),
     ("reportes", "inv_valorado",    "Inventario valorado",     "/dashboard/reportes/inventario",    8, True),
     ("reportes", "auxiliar_tercero","Auxiliar por tercero",    "/dashboard/reportes/auxiliar",      9, True),
+    ("reportes", "auxiliar_centro_costo","Auxiliar por centro de costo","/dashboard/reportes/auxiliar-centro-costo", 10, True),
     ("reportes", "concil_ban",      "Conciliación bancaria",   "/dashboard/reportes/conciliacion", 11, False),
     ("reportes", "ventas_agrup",    "Ventas por agrupación",   "/dashboard/reportes/ventas",       12, True),
     ("reportes", "compras_agrup",   "Compras por agrupación",  "/dashboard/reportes/compras",      13, True),

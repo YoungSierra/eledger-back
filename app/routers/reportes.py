@@ -65,6 +65,34 @@ def auxiliar_excel(
     return reportes_service.auxiliar_excel(db, cuenta_desde, cuenta_hasta, fecha_desde, fecha_hasta, tercero_id)
 
 
+@router.get("/auxiliar-centro-costo")
+def auxiliar_centro_costo(
+    fecha_desde: date = Query(...),
+    fecha_hasta: date = Query(...),
+    cuenta_desde: str | None = Query(None),
+    cuenta_hasta: str | None = Query(None),
+    centro_costo_id: str | None = Query(None),
+    incluir_hijos: bool = Query(False),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return reportes_service.auxiliar_centro_costo(db, cuenta_desde, cuenta_hasta, fecha_desde, fecha_hasta, centro_costo_id, incluir_hijos)
+
+
+@router.get("/auxiliar-centro-costo/excel")
+def auxiliar_centro_costo_excel(
+    fecha_desde: date = Query(...),
+    fecha_hasta: date = Query(...),
+    cuenta_desde: str | None = Query(None),
+    cuenta_hasta: str | None = Query(None),
+    centro_costo_id: str | None = Query(None),
+    incluir_hijos: bool = Query(False),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return reportes_service.auxiliar_cc_excel(db, cuenta_desde, cuenta_hasta, fecha_desde, fecha_hasta, centro_costo_id, incluir_hijos)
+
+
 @router.get("/resultados")
 def resultados(
     fecha_desde: date = Query(...),
