@@ -403,7 +403,10 @@ def enviar_cotizacion(db: Session, cotizacion_id: uuid.UUID, actor: UsuarioActua
     return c
 
 
-def aprobar_cotizacion(db: Session, cotizacion_id: uuid.UUID, actor: UsuarioActual) -> OpeOperacion:
+def aprobar_cotizacion(
+    db: Session, cotizacion_id: uuid.UUID, actor: UsuarioActual,
+    operacion_id: uuid.UUID | None = None,
+) -> OpeOperacion:
     c = obtener_cotizacion(db, cotizacion_id)
     if c.estado != "ENVIADA":
         raise HTTPException(status_code=400, detail=f"Solo se puede aprobar una cotización ENVIADA. Estado: {c.estado}")
@@ -412,21 +415,35 @@ def aprobar_cotizacion(db: Session, cotizacion_id: uuid.UUID, actor: UsuarioActu
     c.modificado_por = actor_id
     c.modificado_en = datetime.now(timezone.utc)
 
-    hoy = date.today()
-    operacion = OpeOperacion(
-        numero=_generar_numero_operacion(db, hoy),
-        cotizacion_id=c.id,
-        fecha_apertura=hoy,
-        estado="ABIERTA",
-        aerolinea_id=c.aerolinea_id,
-        piezas=c.piezas,
-        peso_kg=c.peso_kg,
-        creado_por=actor_id,
-    )
-    db.add(operacion)
+    if operacion_id:
+        # Asociar a una operación existente (debe estar ABIERTA).
+        operacion = db.query(OpeOperacion).filter(
+            OpeOperacion.id == operacion_id, OpeOperacion.activo == True
+        ).first()
+        if not operacion:
+            raise HTTPException(status_code=404, detail="Operación no encontrada")
+        if operacion.estado != "ABIERTA":
+            raise HTTPException(status_code=400, detail="Solo se puede asociar la cotización a una operación ABIERTA")
+        c.operacion_id = operacion.id
+    else:
+        # Crear una operación nueva.
+        hoy = date.today()
+        operacion = OpeOperacion(
+            numero=_generar_numero_operacion(db, hoy),
+            fecha_apertura=hoy,
+            estado="ABIERTA",
+            aerolinea_id=c.aerolinea_id,
+            piezas=c.piezas,
+            peso_kg=c.peso_kg,
+            creado_por=actor_id,
+        )
+        db.add(operacion)
+        db.flush()
+        c.operacion_id = operacion.id
+
     audit(db, "ope_cotizacion", c.id, "UPDATE", actor_id,
           campo="estado", valor_anterior="ENVIADA", valor_nuevo="APROBADA",
-          contexto={"numero": c.numero})
+          contexto={"numero": c.numero, "operacion": operacion.numero})
     db.commit()
     db.refresh(operacion)
     return operacion

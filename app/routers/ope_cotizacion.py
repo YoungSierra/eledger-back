@@ -13,6 +13,7 @@ from app.schemas.ope import (
     OpeCotizacionLineaCreate, OpeCotizacionLineaResponse, OpeCotizacionLineaUpdate,
     OpeCotizacionMargenResponse,
     OpeOperacionResponse,
+    OpeAprobarRequest,
 )
 from app.services import ope_cotizacion_service, ope_operacion_service
 
@@ -111,11 +112,13 @@ def enviar(
 @router.post("/{cotizacion_id}/aprobar", response_model=OpeOperacionResponse)
 def aprobar(
     cotizacion_id: uuid.UUID,
+    body: OpeAprobarRequest = OpeAprobarRequest(),
     db: Session = Depends(get_db),
     actor: UsuarioActual = Depends(get_current_user),
 ):
-    """Aprueba la cotización y crea automáticamente la operación."""
-    return ope_cotizacion_service.aprobar_cotizacion(db, cotizacion_id, actor)
+    """Aprueba la cotización. Sin operacion_id crea una operación nueva; con
+    operacion_id la asocia a una operación ABIERTA existente (consolidación)."""
+    return ope_cotizacion_service.aprobar_cotizacion(db, cotizacion_id, actor, body.operacion_id)
 
 
 @router.post("/{cotizacion_id}/rechazar", response_model=OpeCotizacionResponse)

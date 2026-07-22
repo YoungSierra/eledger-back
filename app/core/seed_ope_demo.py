@@ -522,7 +522,8 @@ def limpiar() -> None:
         else:
             op_ids = [
                 o.id for o in
-                db.query(OpeOperacion).filter(OpeOperacion.cotizacion_id.in_(ids)).all()
+                db.query(OpeOperacion).join(OpeCotizacion, OpeCotizacion.operacion_id == OpeOperacion.id)
+                .filter(OpeCotizacion.id.in_(ids)).all()
             ]
             if op_ids:
                 man_ids = [

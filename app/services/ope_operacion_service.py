@@ -7,11 +7,56 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.models.ope import (
-    OpeOperacion, OpeHawb, OpeMawb,
+    OpeOperacion, OpeCotizacion, OpeHawb, OpeMawb,
     OpeManifiesto, OpeManifiestoLinea,
     OpeEvento, OpeDocumento,
 )
+from app.models.admin import AdmUsuario
+from app.models.adm import AdmTercero
 from app.schemas.auth import UsuarioActual
+
+
+def _nombre_usuario(db: Session, uid) -> str | None:
+    if not uid:
+        return None
+    u = db.get(AdmUsuario, uid)
+    return f"{u.nombre} {u.apellido}" if u else None
+
+
+def _attach_audit(db: Session, obj):
+    """Adjunta los nombres de quién emitió/anuló para la respuesta."""
+    if obj is not None:
+        obj.emitido_por_nombre = _nombre_usuario(db, getattr(obj, "emitido_por", None))
+        obj.anulado_por_nombre = _nombre_usuario(db, getattr(obj, "anulado_por", None))
+        # HAWB: resolver cotización/cliente al que pertenece la guía.
+        if hasattr(obj, "numero_hawb"):
+            cot = db.get(OpeCotizacion, obj.cotizacion_id) if obj.cotizacion_id else None
+            obj.cotizacion_numero = cot.numero if cot else None
+            cli = db.get(AdmTercero, cot.cliente_id) if cot else None
+            obj.cliente_nombre = cli.razon_social if cli else None
+    return obj
+
+
+def _clientes_de_operacion(db: Session, op: OpeOperacion) -> list[dict]:
+    """Clientes involucrados en la operación (distintos, desde sus cotizaciones)."""
+    vistos: dict = {}
+    for c in op.cotizaciones:
+        if c.cliente_id in vistos:
+            continue
+        t = db.get(AdmTercero, c.cliente_id)
+        vistos[c.cliente_id] = {"id": c.cliente_id, "nombre": t.razon_social if t else "", "nit": t.nit if t else None}
+    return list(vistos.values())
+
+
+def _attach_operacion(db: Session, op: OpeOperacion) -> OpeOperacion:
+    op.clientes = _clientes_de_operacion(db, op)
+    return op
+
+
+def _attach_evento(db: Session, e: OpeEvento) -> OpeEvento:
+    h = db.get(OpeHawb, e.hawb_id) if e.hawb_id else None
+    e.hawb_numero = h.numero_hawb if h else None
+    return e
 from app.schemas.ope import (
     OpeOperacionUpdate,
     OpeHawbCreate, OpeHawbUpdate,
@@ -34,14 +79,14 @@ def obtener_operacion(db: Session, operacion_id: uuid.UUID) -> OpeOperacion:
     ).first()
     if not op:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Operación no encontrada")
-    return op
+    return _attach_operacion(db, op)
 
 
 def obtener_operacion_por_cotizacion(db: Session, cotizacion_id: uuid.UUID) -> OpeOperacion:
-    op = db.query(OpeOperacion).filter(OpeOperacion.cotizacion_id == cotizacion_id).first()
-    if not op:
+    cot = db.get(OpeCotizacion, cotizacion_id)
+    if not cot or not cot.operacion_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="La cotización no tiene operación asociada")
-    return op
+    return obtener_operacion(db, cot.operacion_id)
 
 
 def listar_operaciones(
@@ -52,11 +97,11 @@ def listar_operaciones(
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
 ) -> list[OpeOperacion]:
-    from app.models.ope import OpeCotizacion
     q = db.query(OpeOperacion).filter(OpeOperacion.activo == True)
     if actor.ver_solo_propios:
-        q = q.join(OpeCotizacion, OpeOperacion.cotizacion_id == OpeCotizacion.id)\
-             .filter(OpeCotizacion.asesor_id == uuid.UUID(actor.id))
+        q = q.join(OpeCotizacion, OpeCotizacion.operacion_id == OpeOperacion.id)\
+             .filter(OpeCotizacion.asesor_id == uuid.UUID(actor.id))\
+             .distinct()
     if estado:
         q = q.filter(OpeOperacion.estado == estado)
     if busqueda:
@@ -65,7 +110,10 @@ def listar_operaciones(
         q = q.filter(OpeOperacion.fecha_apertura >= fecha_desde)
     if fecha_hasta:
         q = q.filter(OpeOperacion.fecha_apertura <= fecha_hasta)
-    return q.order_by(OpeOperacion.fecha_apertura.desc(), OpeOperacion.creado_en.desc()).all()
+    rows = q.order_by(OpeOperacion.fecha_apertura.desc(), OpeOperacion.creado_en.desc()).all()
+    for op in rows:
+        _attach_operacion(db, op)
+    return rows
 
 
 def actualizar_operacion(
@@ -113,14 +161,23 @@ def actualizar_operacion(
 def obtener_carpeta(db: Session, operacion_id: uuid.UUID) -> OpeOperacionCarpetaResponse:
     op = obtener_operacion(db, operacion_id)
     from app.services.ope_cotizacion_service import obtener_cotizacion
-    cot = obtener_cotizacion(db, op.cotizacion_id)
+    cotizaciones = [obtener_cotizacion(db, c.id) for c in
+                    sorted(op.cotizaciones, key=lambda x: x.numero)]
+    for h in op.hawbs:
+        _attach_audit(db, h)
+    for m in op.mawbs:
+        _attach_audit(db, m)
+    for mf in op.manifiestos:
+        _attach_audit(db, mf)
+    eventos = [_attach_evento(db, e) for e in op.eventos]
     return OpeOperacionCarpetaResponse(
         operacion=op,
-        cotizacion=cot,
+        cotizaciones=cotizaciones,
+        clientes=op.clientes,
         hawbs=op.hawbs,
         mawbs=op.mawbs,
         manifiestos=op.manifiestos,
-        eventos=op.eventos,
+        eventos=eventos,
         documentos=op.documentos,
     )
 
@@ -131,20 +188,32 @@ def obtener_carpeta(db: Session, operacion_id: uuid.UUID) -> OpeOperacionCarpeta
 
 def listar_hawbs(db: Session, operacion_id: uuid.UUID) -> list[OpeHawb]:
     obtener_operacion(db, operacion_id)
-    return db.query(OpeHawb).filter(OpeHawb.operacion_id == operacion_id).order_by(OpeHawb.creado_en).all()
+    rows = db.query(OpeHawb).filter(OpeHawb.operacion_id == operacion_id).order_by(OpeHawb.creado_en).all()
+    for r in rows:
+        _attach_audit(db, r)
+    return rows
 
 
 def obtener_hawb(db: Session, operacion_id: uuid.UUID, hawb_id: uuid.UUID) -> OpeHawb:
     h = db.query(OpeHawb).filter(OpeHawb.id == hawb_id, OpeHawb.operacion_id == operacion_id).first()
     if not h:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HAWB no encontrado")
-    return h
+    return _attach_audit(db, h)
+
+
+def _validar_cotizacion_op(db: Session, operacion_id: uuid.UUID, cotizacion_id) -> None:
+    if not cotizacion_id:
+        return
+    cot = db.get(OpeCotizacion, cotizacion_id)
+    if not cot or cot.operacion_id != operacion_id:
+        raise HTTPException(status_code=400, detail="La cotización seleccionada no pertenece a esta operación")
 
 
 def crear_hawb(db: Session, operacion_id: uuid.UUID, data: OpeHawbCreate, actor: UsuarioActual) -> OpeHawb:
     op = obtener_operacion(db, operacion_id)
     if op.estado == "CERRADA":
         raise HTTPException(status_code=400, detail="No se pueden agregar documentos a una operación cerrada")
+    _validar_cotizacion_op(db, operacion_id, data.cotizacion_id)
     h = OpeHawb(
         operacion_id=operacion_id,
         creado_por=uuid.UUID(actor.id),
@@ -153,7 +222,7 @@ def crear_hawb(db: Session, operacion_id: uuid.UUID, data: OpeHawbCreate, actor:
     db.add(h)
     db.commit()
     db.refresh(h)
-    return h
+    return _attach_audit(db, h)
 
 
 def actualizar_hawb(
@@ -162,13 +231,41 @@ def actualizar_hawb(
     h = obtener_hawb(db, operacion_id, hawb_id)
     if h.estado == "ANULADA":
         raise HTTPException(status_code=400, detail="No se puede modificar un HAWB anulado")
+    _validar_cotizacion_op(db, operacion_id, data.cotizacion_id)
     for campo, valor in data.model_dump(exclude_none=True).items():
         setattr(h, campo, valor)
     h.modificado_por = uuid.UUID(actor.id)
     h.modificado_en = datetime.now(timezone.utc)
     db.commit()
     db.refresh(h)
-    return h
+    return _attach_audit(db, h)
+
+
+def emitir_hawb(db: Session, operacion_id: uuid.UUID, hawb_id: uuid.UUID, actor: UsuarioActual) -> OpeHawb:
+    h = obtener_hawb(db, operacion_id, hawb_id)
+    if h.estado != "BORRADOR":
+        raise HTTPException(status_code=400, detail="Solo se puede emitir un HAWB en borrador")
+    if not h.cotizacion_id:
+        raise HTTPException(status_code=400, detail="Asigna la cotización/cliente al HAWB antes de emitirlo")
+    h.estado = "EMITIDA"
+    h.emitido_por = uuid.UUID(actor.id)
+    h.emitido_en = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(h)
+    return _attach_audit(db, h)
+
+
+def anular_hawb(db: Session, operacion_id: uuid.UUID, hawb_id: uuid.UUID, motivo: str, actor: UsuarioActual) -> OpeHawb:
+    h = obtener_hawb(db, operacion_id, hawb_id)
+    if h.estado == "ANULADA":
+        raise HTTPException(status_code=400, detail="El HAWB ya está anulado")
+    h.estado = "ANULADA"
+    h.anulado_por = uuid.UUID(actor.id)
+    h.anulado_en = datetime.now(timezone.utc)
+    h.anulado_motivo = motivo
+    db.commit()
+    db.refresh(h)
+    return _attach_audit(db, h)
 
 
 # ---------------------------------------------------------------------------
@@ -177,14 +274,17 @@ def actualizar_hawb(
 
 def listar_mawbs(db: Session, operacion_id: uuid.UUID) -> list[OpeMawb]:
     obtener_operacion(db, operacion_id)
-    return db.query(OpeMawb).filter(OpeMawb.operacion_id == operacion_id).order_by(OpeMawb.creado_en).all()
+    rows = db.query(OpeMawb).filter(OpeMawb.operacion_id == operacion_id).order_by(OpeMawb.creado_en).all()
+    for r in rows:
+        _attach_audit(db, r)
+    return rows
 
 
 def obtener_mawb(db: Session, operacion_id: uuid.UUID, mawb_id: uuid.UUID) -> OpeMawb:
     m = db.query(OpeMawb).filter(OpeMawb.id == mawb_id, OpeMawb.operacion_id == operacion_id).first()
     if not m:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MAWB no encontrado")
-    return m
+    return _attach_audit(db, m)
 
 
 def crear_mawb(db: Session, operacion_id: uuid.UUID, data: OpeMawbCreate, actor: UsuarioActual) -> OpeMawb:
@@ -217,6 +317,31 @@ def actualizar_mawb(
     return m
 
 
+def emitir_mawb(db: Session, operacion_id: uuid.UUID, mawb_id: uuid.UUID, actor: UsuarioActual) -> OpeMawb:
+    m = obtener_mawb(db, operacion_id, mawb_id)
+    if m.estado != "BORRADOR":
+        raise HTTPException(status_code=400, detail="Solo se puede emitir un MAWB en borrador")
+    m.estado = "EMITIDA"
+    m.emitido_por = uuid.UUID(actor.id)
+    m.emitido_en = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(m)
+    return _attach_audit(db, m)
+
+
+def anular_mawb(db: Session, operacion_id: uuid.UUID, mawb_id: uuid.UUID, motivo: str, actor: UsuarioActual) -> OpeMawb:
+    m = obtener_mawb(db, operacion_id, mawb_id)
+    if m.estado == "ANULADA":
+        raise HTTPException(status_code=400, detail="El MAWB ya está anulado")
+    m.estado = "ANULADA"
+    m.anulado_por = uuid.UUID(actor.id)
+    m.anulado_en = datetime.now(timezone.utc)
+    m.anulado_motivo = motivo
+    db.commit()
+    db.refresh(m)
+    return _attach_audit(db, m)
+
+
 # ---------------------------------------------------------------------------
 # Manifiesto
 # ---------------------------------------------------------------------------
@@ -227,12 +352,15 @@ def obtener_manifiesto(db: Session, operacion_id: uuid.UUID, manifiesto_id: uuid
     ).first()
     if not m:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Manifiesto no encontrado")
-    return m
+    return _attach_audit(db, m)
 
 
 def listar_manifiestos(db: Session, operacion_id: uuid.UUID) -> list[OpeManifiesto]:
     obtener_operacion(db, operacion_id)
-    return db.query(OpeManifiesto).filter(OpeManifiesto.operacion_id == operacion_id).order_by(OpeManifiesto.fecha).all()
+    rows = db.query(OpeManifiesto).filter(OpeManifiesto.operacion_id == operacion_id).order_by(OpeManifiesto.fecha).all()
+    for r in rows:
+        _attach_audit(db, r)
+    return rows
 
 
 def crear_manifiesto(db: Session, operacion_id: uuid.UUID, data: OpeManifiestoCreate, actor: UsuarioActual) -> OpeManifiesto:
@@ -293,26 +421,59 @@ def actualizar_manifiesto(
     return m
 
 
+def emitir_manifiesto(db: Session, operacion_id: uuid.UUID, manifiesto_id: uuid.UUID, actor: UsuarioActual) -> OpeManifiesto:
+    m = obtener_manifiesto(db, operacion_id, manifiesto_id)
+    if m.estado != "BORRADOR":
+        raise HTTPException(status_code=400, detail="Solo se puede emitir un manifiesto en borrador")
+    m.estado = "EMITIDA"
+    m.emitido_por = uuid.UUID(actor.id)
+    m.emitido_en = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(m)
+    return _attach_audit(db, m)
+
+
+def anular_manifiesto(db: Session, operacion_id: uuid.UUID, manifiesto_id: uuid.UUID, motivo: str, actor: UsuarioActual) -> OpeManifiesto:
+    m = obtener_manifiesto(db, operacion_id, manifiesto_id)
+    if m.estado == "ANULADA":
+        raise HTTPException(status_code=400, detail="El manifiesto ya está anulado")
+    m.estado = "ANULADA"
+    m.anulado_por = uuid.UUID(actor.id)
+    m.anulado_en = datetime.now(timezone.utc)
+    m.anulado_motivo = motivo
+    db.commit()
+    db.refresh(m)
+    return _attach_audit(db, m)
+
+
 # ---------------------------------------------------------------------------
 # Eventos (bitácora)
 # ---------------------------------------------------------------------------
 
 def listar_eventos(db: Session, operacion_id: uuid.UUID) -> list[OpeEvento]:
     obtener_operacion(db, operacion_id)
-    return (
+    rows = (
         db.query(OpeEvento)
         .filter(OpeEvento.operacion_id == operacion_id)
         .order_by(OpeEvento.fecha_hora.desc())
         .all()
     )
+    for e in rows:
+        _attach_evento(db, e)
+    return rows
 
 
 def registrar_evento(
     db: Session, operacion_id: uuid.UUID, data: OpeEventoCreate, actor: UsuarioActual
 ) -> OpeEvento:
     obtener_operacion(db, operacion_id)
+    if data.hawb_id:
+        h = db.query(OpeHawb).filter(OpeHawb.id == data.hawb_id, OpeHawb.operacion_id == operacion_id).first()
+        if not h:
+            raise HTTPException(status_code=400, detail="El HAWB no pertenece a esta operación")
     evento = OpeEvento(
         operacion_id=operacion_id,
+        hawb_id=data.hawb_id,
         usuario_id=uuid.UUID(actor.id),
         tipo=data.tipo,
         descripcion=data.descripcion,
@@ -321,7 +482,7 @@ def registrar_evento(
     db.add(evento)
     db.commit()
     db.refresh(evento)
-    return evento
+    return _attach_evento(db, evento)
 
 
 # ---------------------------------------------------------------------------

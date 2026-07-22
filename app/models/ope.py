@@ -114,11 +114,13 @@ class OpeCotizacion(Base, AuditMixin):
     estado: Mapped[str] = mapped_column(String(20), default="BORRADOR", nullable=False)
 
     asesor_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_usuario.id"), nullable=True)
+    # Una operación agrupa 1..N cotizaciones (consolidación de clientes).
+    operacion_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_operacion.id"), nullable=True, index=True)
 
     cliente: Mapped["AdmTercero"] = relationship("AdmTercero", foreign_keys=[cliente_id])
     aerolinea: Mapped[Optional["OpeAerolinea"]] = relationship("OpeAerolinea", foreign_keys=[aerolinea_id])
     lineas: Mapped[list["OpeCotizacionLinea"]] = relationship("OpeCotizacionLinea", back_populates="cotizacion", cascade="all, delete-orphan")
-    operacion: Mapped[Optional["OpeOperacion"]] = relationship("OpeOperacion", back_populates="cotizacion", uselist=False)
+    operacion: Mapped[Optional["OpeOperacion"]] = relationship("OpeOperacion", foreign_keys=[operacion_id], back_populates="cotizaciones")
 
 
 class OpeCotizacionLinea(Base):
@@ -162,19 +164,17 @@ class OpeOperacion(Base, AuditMixin):
     __table_args__ = (
         CheckConstraint(f"estado IN {_ESTADOS_OPE}", name="chk_operacion_estado"),
         Index("idx_operacion_estado", "estado"),
-        Index("idx_operacion_cotizacion", "cotizacion_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     numero: Mapped[str] = mapped_column(String(20), unique=True, nullable=False)
-    cotizacion_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_cotizacion.id"), unique=True, nullable=False)
     fecha_apertura: Mapped[date] = mapped_column(Date, nullable=False)
     estado: Mapped[str] = mapped_column(String(20), default="ABIERTA", nullable=False)
     aerolinea_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_aerolinea.id"), nullable=True)
     piezas: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     peso_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
 
-    cotizacion: Mapped["OpeCotizacion"] = relationship("OpeCotizacion", back_populates="operacion")
+    cotizaciones: Mapped[list["OpeCotizacion"]] = relationship("OpeCotizacion", foreign_keys="OpeCotizacion.operacion_id", back_populates="operacion")
     aerolinea: Mapped[Optional["OpeAerolinea"]] = relationship("OpeAerolinea", foreign_keys=[aerolinea_id])
     hawbs: Mapped[list["OpeHawb"]] = relationship("OpeHawb", back_populates="operacion", cascade="all, delete-orphan")
     mawbs: Mapped[list["OpeMawb"]] = relationship("OpeMawb", back_populates="operacion", cascade="all, delete-orphan")
@@ -200,6 +200,8 @@ class OpeHawb(Base, AuditMixin):
     id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     operacion_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_operacion.id"), nullable=False)
     mawb_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_mawb.id"), nullable=True)
+    # Cliente/cotización a la que pertenece esta guía hija (consolidación).
+    cotizacion_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_cotizacion.id"), nullable=True, index=True)
     numero_hawb: Mapped[str] = mapped_column(String(50), nullable=False)
     shipper_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=False)
     shipper_account: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
@@ -235,8 +237,14 @@ class OpeHawb(Base, AuditMixin):
     fecha_ejecucion: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     lugar_ejecucion: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     estado: Mapped[str] = mapped_column(String(20), default="BORRADOR", nullable=False)
+    emitido_por: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
+    emitido_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    anulado_por: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
+    anulado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    anulado_motivo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     operacion: Mapped["OpeOperacion"] = relationship("OpeOperacion", back_populates="hawbs")
+    cotizacion: Mapped[Optional["OpeCotizacion"]] = relationship("OpeCotizacion", foreign_keys=[cotizacion_id])
     mawb: Mapped[Optional["OpeMawb"]] = relationship("OpeMawb", foreign_keys=[mawb_id], back_populates="hawbs")
     shipper: Mapped["AdmTercero"] = relationship("AdmTercero", foreign_keys=[shipper_id])
     consignee: Mapped["AdmTercero"] = relationship("AdmTercero", foreign_keys=[consignee_id])
@@ -296,6 +304,11 @@ class OpeMawb(Base, AuditMixin):
     fecha_ejecucion: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     lugar_ejecucion: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     estado: Mapped[str] = mapped_column(String(20), default="BORRADOR", nullable=False)
+    emitido_por: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
+    emitido_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    anulado_por: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
+    anulado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    anulado_motivo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     operacion: Mapped["OpeOperacion"] = relationship("OpeOperacion", back_populates="mawbs")
     consignee: Mapped[Optional["AdmTercero"]] = relationship("AdmTercero", foreign_keys=[consignee_id])
@@ -319,6 +332,11 @@ class OpeManifiesto(Base):
     aerolinea_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_aerolinea.id"), nullable=True)
     fecha: Mapped[date] = mapped_column(Date, nullable=False)
     estado: Mapped[str] = mapped_column(String(20), default="BORRADOR", nullable=False)
+    emitido_por: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
+    emitido_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    anulado_por: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
+    anulado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    anulado_motivo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     creado_por: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), nullable=False)
 
@@ -363,6 +381,8 @@ class OpeEvento(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     operacion_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_operacion.id"), nullable=False)
+    # Evento dirigido a un HAWB (cliente) específico; null = evento de operación.
+    hawb_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_hawb.id"), nullable=True, index=True)
     fecha_hora: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     usuario_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_usuario.id"), nullable=False)
     tipo: Mapped[str] = mapped_column(String(30), nullable=False)
@@ -370,6 +390,7 @@ class OpeEvento(Base):
     notificado_cliente: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     operacion: Mapped["OpeOperacion"] = relationship("OpeOperacion", back_populates="eventos")
+    hawb: Mapped[Optional["OpeHawb"]] = relationship("OpeHawb", foreign_keys=[hawb_id])
 
 
 class OpeDocumento(Base):

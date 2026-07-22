@@ -9,6 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -128,21 +129,34 @@ def listar_operaciones(
 
     operaciones = (
         db.query(OpeOperacion)
-        .join(OpeCotizacion, OpeOperacion.cotizacion_id == OpeCotizacion.id)
+        .join(OpeCotizacion, OpeCotizacion.operacion_id == OpeOperacion.id)
         .filter(OpeCotizacion.cliente_id == usuario.tercero_id)
         .order_by(OpeOperacion.fecha_apertura.desc())
+        .distinct()
         .all()
     )
 
     resultado = []
     for op in operaciones:
-        eventos = (
+        # Solo las cotizaciones/HAWB del cliente dentro de esta operación.
+        cotis = [c for c in op.cotizaciones if c.cliente_id == usuario.tercero_id]
+        coti_ids = [c.id for c in cotis]
+        cot0 = cotis[0] if cotis else None
+        hawbs_cli = db.query(OpeHawb).filter(
+            OpeHawb.operacion_id == op.id, OpeHawb.cotizacion_id.in_(coti_ids)
+        ).all() if coti_ids else []
+        hawb_ids = [h.id for h in hawbs_cli]
+
+        evento = (
             db.query(OpeEvento)
-            .filter(OpeEvento.operacion_id == op.id, OpeEvento.notificado_cliente == True)
+            .filter(
+                OpeEvento.operacion_id == op.id,
+                OpeEvento.notificado_cliente == True,
+                or_(OpeEvento.hawb_id.is_(None), OpeEvento.hawb_id.in_(hawb_ids)),
+            )
             .order_by(OpeEvento.fecha_hora.desc())
             .first()
         )
-        hawbs_count = db.query(OpeHawb).filter(OpeHawb.operacion_id == op.id).count()
         mawbs_count = db.query(OpeMawb).filter(OpeMawb.operacion_id == op.id).count()
 
         resultado.append(OperacionPortal(
@@ -150,14 +164,14 @@ def listar_operaciones(
             numero=op.numero,
             fecha_apertura=op.fecha_apertura.isoformat(),
             estado=op.estado,
-            origen=op.cotizacion.origen if op.cotizacion else "",
-            destino=op.cotizacion.destino if op.cotizacion else "",
-            tipo_operacion=op.cotizacion.tipo_operacion if op.cotizacion else "",
-            ultimo_evento=eventos.descripcion if eventos else None,
-            ultima_fecha=eventos.fecha_hora.strftime("%Y-%m-%d %H:%M") if eventos else None,
+            origen=cot0.origen if cot0 else "",
+            destino=cot0.destino if cot0 else "",
+            tipo_operacion=cot0.tipo_operacion if cot0 else "",
+            ultimo_evento=evento.descripcion if evento else None,
+            ultima_fecha=evento.fecha_hora.strftime("%Y-%m-%d %H:%M") if evento else None,
             piezas=op.piezas,
             peso_kg=op.peso_kg,
-            hawbs_count=hawbs_count,
+            hawbs_count=len(hawbs_cli),
             mawbs_count=mawbs_count,
         ))
     return resultado
@@ -173,18 +187,28 @@ def detalle_operacion(
 
     op = (
         db.query(OpeOperacion)
-        .join(OpeCotizacion, OpeOperacion.cotizacion_id == OpeCotizacion.id)
+        .join(OpeCotizacion, OpeCotizacion.operacion_id == OpeOperacion.id)
         .filter(OpeOperacion.id == operacion_id, OpeCotizacion.cliente_id == usuario.tercero_id)
         .first()
     )
     if not op:
         raise HTTPException(status_code=404, detail="Operación no encontrada")
 
-    hawbs = db.query(OpeHawb).filter(OpeHawb.operacion_id == op.id).all()
+    cotis = [c for c in op.cotizaciones if c.cliente_id == usuario.tercero_id]
+    coti_ids = [c.id for c in cotis]
+    cot0 = cotis[0] if cotis else None
+    hawbs = db.query(OpeHawb).filter(
+        OpeHawb.operacion_id == op.id, OpeHawb.cotizacion_id.in_(coti_ids)
+    ).all() if coti_ids else []
+    hawb_ids = [h.id for h in hawbs]
     mawbs = db.query(OpeMawb).filter(OpeMawb.operacion_id == op.id).all()
     eventos = (
         db.query(OpeEvento)
-        .filter(OpeEvento.operacion_id == op.id, OpeEvento.notificado_cliente == True)
+        .filter(
+            OpeEvento.operacion_id == op.id,
+            OpeEvento.notificado_cliente == True,
+            or_(OpeEvento.hawb_id.is_(None), OpeEvento.hawb_id.in_(hawb_ids)),
+        )
         .order_by(OpeEvento.fecha_hora.desc())
         .all()
     )
@@ -194,9 +218,9 @@ def detalle_operacion(
         numero=op.numero,
         fecha_apertura=op.fecha_apertura.isoformat(),
         estado=op.estado,
-        origen=op.cotizacion.origen if op.cotizacion else "",
-        destino=op.cotizacion.destino if op.cotizacion else "",
-        tipo_operacion=op.cotizacion.tipo_operacion if op.cotizacion else "",
+        origen=cot0.origen if cot0 else "",
+        destino=cot0.destino if cot0 else "",
+        tipo_operacion=cot0.tipo_operacion if cot0 else "",
         piezas=op.piezas,
         peso_kg=op.peso_kg,
         hawbs=[HawbPortal(

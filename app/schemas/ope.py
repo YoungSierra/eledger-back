@@ -277,6 +277,7 @@ class OpeCotizacionResponse(BaseModel):
     notas: Optional[str]
     asesor_id: Optional[uuid.UUID] = None
     asesor_nombre: Optional[str] = None
+    operacion_id: Optional[uuid.UUID] = None
     estado: EstadoCotizacionType
     activo: bool
     creado_en: datetime
@@ -343,10 +344,15 @@ class OpeCotizacionMargenResponse(BaseModel):
 # Operación
 # ---------------------------------------------------------------------------
 
+class ClienteResumen(BaseModel):
+    id: uuid.UUID
+    nombre: str
+    nit: Optional[str] = None
+
+
 class OpeOperacionResponse(BaseModel):
     id: uuid.UUID
     numero: str
-    cotizacion_id: uuid.UUID
     fecha_apertura: date
     estado: EstadoOperacionType
     aerolinea_id: Optional[uuid.UUID]
@@ -354,6 +360,7 @@ class OpeOperacionResponse(BaseModel):
     peso_kg: Optional[Decimal]
     activo: bool
     creado_en: datetime
+    clientes: list[ClienteResumen] = []
 
     model_config = {"from_attributes": True}
 
@@ -372,6 +379,7 @@ class OpeOperacionUpdate(BaseModel):
 class OpeHawbCreate(BaseModel):
     numero_hawb: str
     mawb_id: Optional[uuid.UUID] = None
+    cotizacion_id: Optional[uuid.UUID] = None
     shipper_id: uuid.UUID
     shipper_account: Optional[str] = None
     consignee_id: uuid.UUID
@@ -410,6 +418,7 @@ class OpeHawbCreate(BaseModel):
 class OpeHawbUpdate(BaseModel):
     numero_hawb: Optional[str] = None
     mawb_id: Optional[uuid.UUID] = None
+    cotizacion_id: Optional[uuid.UUID] = None
     shipper_id: Optional[uuid.UUID] = None
     shipper_account: Optional[str] = None
     consignee_id: Optional[uuid.UUID] = None
@@ -443,13 +452,15 @@ class OpeHawbUpdate(BaseModel):
     otros_cargos: Optional[str] = None
     fecha_ejecucion: Optional[date] = None
     lugar_ejecucion: Optional[str] = None
-    estado: Optional[EstadoDocTransporteType] = None
 
 
 class OpeHawbResponse(BaseModel):
     id: uuid.UUID
     operacion_id: uuid.UUID
     mawb_id: Optional[uuid.UUID]
+    cotizacion_id: Optional[uuid.UUID] = None
+    cotizacion_numero: Optional[str] = None
+    cliente_nombre: Optional[str] = None
     numero_hawb: str
     shipper_id: uuid.UUID
     shipper_account: Optional[str]
@@ -485,6 +496,13 @@ class OpeHawbResponse(BaseModel):
     fecha_ejecucion: Optional[date]
     lugar_ejecucion: Optional[str]
     estado: EstadoDocTransporteType
+    emitido_por: Optional[uuid.UUID] = None
+    emitido_por_nombre: Optional[str] = None
+    emitido_en: Optional[datetime] = None
+    anulado_por: Optional[uuid.UUID] = None
+    anulado_por_nombre: Optional[str] = None
+    anulado_en: Optional[datetime] = None
+    anulado_motivo: Optional[str] = None
     creado_en: datetime
 
     model_config = {"from_attributes": True}
@@ -572,7 +590,6 @@ class OpeMawbUpdate(BaseModel):
     total_prepaid: Optional[Decimal] = None
     fecha_ejecucion: Optional[date] = None
     lugar_ejecucion: Optional[str] = None
-    estado: Optional[EstadoDocTransporteType] = None
 
 
 class OpeMawbResponse(BaseModel):
@@ -616,6 +633,13 @@ class OpeMawbResponse(BaseModel):
     fecha_ejecucion: Optional[date]
     lugar_ejecucion: Optional[str]
     estado: EstadoDocTransporteType
+    emitido_por: Optional[uuid.UUID] = None
+    emitido_por_nombre: Optional[str] = None
+    emitido_en: Optional[datetime] = None
+    anulado_por: Optional[uuid.UUID] = None
+    anulado_por_nombre: Optional[str] = None
+    anulado_en: Optional[datetime] = None
+    anulado_motivo: Optional[str] = None
     creado_en: datetime
 
     model_config = {"from_attributes": True}
@@ -657,7 +681,10 @@ class OpeManifiestoCreate(BaseModel):
 class OpeManifiestoUpdate(BaseModel):
     aerolinea_id: Optional[uuid.UUID] = None
     fecha: Optional[date] = None
-    estado: Optional[EstadoDocTransporteType] = None
+
+
+class OpeAnularRequest(BaseModel):
+    motivo: str
 
 
 class OpeManifiestoResponse(BaseModel):
@@ -667,6 +694,13 @@ class OpeManifiestoResponse(BaseModel):
     aerolinea_id: Optional[uuid.UUID]
     fecha: date
     estado: EstadoDocTransporteType
+    emitido_por: Optional[uuid.UUID] = None
+    emitido_por_nombre: Optional[str] = None
+    emitido_en: Optional[datetime] = None
+    anulado_por: Optional[uuid.UUID] = None
+    anulado_por_nombre: Optional[str] = None
+    anulado_en: Optional[datetime] = None
+    anulado_motivo: Optional[str] = None
     creado_en: datetime
     lineas: list[OpeManifiestoLineaResponse] = []
 
@@ -681,11 +715,14 @@ class OpeEventoCreate(BaseModel):
     tipo: TipoEventoType
     descripcion: str
     notificado_cliente: bool = False
+    hawb_id: Optional[uuid.UUID] = None
 
 
 class OpeEventoResponse(BaseModel):
     id: uuid.UUID
     operacion_id: uuid.UUID
+    hawb_id: Optional[uuid.UUID] = None
+    hawb_numero: Optional[str] = None
     fecha_hora: datetime
     usuario_id: uuid.UUID
     tipo: TipoEventoType
@@ -728,9 +765,15 @@ class OpeDocumentoResponse(BaseModel):
 # Carpeta completa de la operación (vista consolidada)
 # ---------------------------------------------------------------------------
 
+class OpeAprobarRequest(BaseModel):
+    # None = crear operación nueva; con valor = asociar a esa operación ABIERTA.
+    operacion_id: Optional[uuid.UUID] = None
+
+
 class OpeOperacionCarpetaResponse(BaseModel):
     operacion: OpeOperacionResponse
-    cotizacion: OpeCotizacionResponse
+    cotizaciones: list[OpeCotizacionResponse] = []
+    clientes: list[ClienteResumen] = []
     hawbs: list[OpeHawbResponse] = []
     mawbs: list[OpeMawbResponse] = []
     manifiestos: list[OpeManifiestoResponse] = []

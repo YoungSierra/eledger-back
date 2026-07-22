@@ -15,6 +15,7 @@ from app.schemas.ope import (
     OpeHawbCreate, OpeHawbResponse, OpeHawbUpdate,
     OpeMawbCreate, OpeMawbResponse, OpeMawbUpdate,
     OpeManifiestoCreate, OpeManifiestoResponse, OpeManifiestoUpdate,
+    OpeAnularRequest,
     OpeEventoCreate, OpeEventoResponse,
     OpeDocumentoCreate, OpeDocumentoResponse, OpeDocumentoUpdate,
 )
@@ -112,6 +113,27 @@ def actualizar_hawb(
     return ope_operacion_service.actualizar_hawb(db, operacion_id, hawb_id, body, actor)
 
 
+@router.post("/{operacion_id}/hawbs/{hawb_id}/emitir", response_model=OpeHawbResponse)
+def emitir_hawb(
+    operacion_id: uuid.UUID,
+    hawb_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return ope_operacion_service.emitir_hawb(db, operacion_id, hawb_id, actor)
+
+
+@router.post("/{operacion_id}/hawbs/{hawb_id}/anular", response_model=OpeHawbResponse)
+def anular_hawb(
+    operacion_id: uuid.UUID,
+    hawb_id: uuid.UUID,
+    body: OpeAnularRequest,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return ope_operacion_service.anular_hawb(db, operacion_id, hawb_id, body.motivo, actor)
+
+
 # ---------------------------------------------------------------------------
 # MAWB
 # ---------------------------------------------------------------------------
@@ -156,6 +178,27 @@ def actualizar_mawb(
     return ope_operacion_service.actualizar_mawb(db, operacion_id, mawb_id, body, actor)
 
 
+@router.post("/{operacion_id}/mawbs/{mawb_id}/emitir", response_model=OpeMawbResponse)
+def emitir_mawb(
+    operacion_id: uuid.UUID,
+    mawb_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return ope_operacion_service.emitir_mawb(db, operacion_id, mawb_id, actor)
+
+
+@router.post("/{operacion_id}/mawbs/{mawb_id}/anular", response_model=OpeMawbResponse)
+def anular_mawb(
+    operacion_id: uuid.UUID,
+    mawb_id: uuid.UUID,
+    body: OpeAnularRequest,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return ope_operacion_service.anular_mawb(db, operacion_id, mawb_id, body.motivo, actor)
+
+
 # ---------------------------------------------------------------------------
 # Manifiesto
 # ---------------------------------------------------------------------------
@@ -198,6 +241,27 @@ def actualizar_manifiesto(
     actor: UsuarioActual = Depends(get_current_user),
 ):
     return ope_operacion_service.actualizar_manifiesto(db, operacion_id, manifiesto_id, body, actor)
+
+
+@router.post("/{operacion_id}/manifiestos/{manifiesto_id}/emitir", response_model=OpeManifiestoResponse)
+def emitir_manifiesto(
+    operacion_id: uuid.UUID,
+    manifiesto_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return ope_operacion_service.emitir_manifiesto(db, operacion_id, manifiesto_id, actor)
+
+
+@router.post("/{operacion_id}/manifiestos/{manifiesto_id}/anular", response_model=OpeManifiestoResponse)
+def anular_manifiesto(
+    operacion_id: uuid.UUID,
+    manifiesto_id: uuid.UUID,
+    body: OpeAnularRequest,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return ope_operacion_service.anular_manifiesto(db, operacion_id, manifiesto_id, body.motivo, actor)
 
 
 # ---------------------------------------------------------------------------
