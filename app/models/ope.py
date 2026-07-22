@@ -72,7 +72,12 @@ class OpeConcepto(Base, AuditMixin):
     moneda: Mapped[str] = mapped_column(String(3), nullable=False)
     # FK a cnt_cuenta se agrega en Fase 1
     cuenta_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
+    # Parámetros de facturación (una factura de venta se arma desde el concepto).
+    cuenta_ingreso_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
+    tarifa_iva_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_tarifa_iva.id"), nullable=True)
 
+    cuenta_ingreso: Mapped[Optional["CntCuenta"]] = relationship("CntCuenta", foreign_keys=[cuenta_ingreso_id])
+    tarifa_iva: Mapped[Optional["AdmTarifaIva"]] = relationship("AdmTarifaIva", foreign_keys=[tarifa_iva_id])
     lineas: Mapped[list["OpeCotizacionLinea"]] = relationship("OpeCotizacionLinea", back_populates="concepto")
 
 

@@ -45,6 +45,8 @@ class LineaFacCreate(BaseModel):
     total: Decimal
     cuenta_ingreso_id: Optional[uuid.UUID] = None
     centro_costo_id: Optional[uuid.UUID] = None
+    cotizacion_linea_id: Optional[uuid.UUID] = None
+    monto_cotizacion: Optional[Decimal] = None
 
 
 class LineaFacResponse(BaseModel):
@@ -73,6 +75,8 @@ class LineaFacResponse(BaseModel):
     centro_costo_id: Optional[uuid.UUID] = None
     centro_costo_codigo: Optional[str] = None
     centro_costo_nombre: Optional[str] = None
+    cotizacion_linea_id: Optional[uuid.UUID] = None
+    monto_cotizacion: Optional[Decimal] = None
 
     model_config = {"from_attributes": True}
 
@@ -81,6 +85,7 @@ class FacFacturaCreate(BaseModel):
     fecha: date
     fecha_vencimiento: date
     cliente_id: uuid.UUID
+    cotizacion_id: Optional[uuid.UUID] = None
     moneda_id: uuid.UUID
     trm: Optional[Decimal] = None
     condicion_pago_id: Optional[uuid.UUID] = None
@@ -105,6 +110,20 @@ class AnularFacturaRequest(BaseModel):
     motivo: str
 
 
+class FacturarCotizacionLineaReq(BaseModel):
+    cotizacion_linea_id: uuid.UUID
+    monto: Decimal   # en la moneda NATIVA de la línea de cotización
+
+
+class FacturarCotizacionRequest(BaseModel):
+    moneda: str      # "COP" | "USD" (moneda de la factura)
+    fecha: date
+    fecha_vencimiento: date
+    condicion_pago_id: Optional[uuid.UUID] = None
+    notas: Optional[str] = None
+    lineas: list[FacturarCotizacionLineaReq]
+
+
 class FacFacturaResponse(BaseModel):
     id: uuid.UUID
     numero: str
@@ -121,6 +140,8 @@ class FacFacturaResponse(BaseModel):
     cliente_email: Optional[str] = None
     cliente_regimen: Optional[str] = None
     cliente_responsable_iva: bool = False
+    cotizacion_id: Optional[uuid.UUID] = None
+    cotizacion_numero: Optional[str] = None
     moneda_id: uuid.UUID
     moneda_codigo: str
     trm: Optional[Decimal] = None

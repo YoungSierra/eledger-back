@@ -154,6 +154,17 @@ def operacion_de_cotizacion(
     return ope_operacion_service.obtener_operacion_por_cotizacion(db, cotizacion_id)
 
 
+@router.get("/{cotizacion_id}/facturacion")
+def estado_facturacion(
+    cotizacion_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    """Estado de facturación de la cotización: por línea, facturado vs pendiente."""
+    from app.services import facturacion_service
+    return facturacion_service.estado_facturacion_cotizacion(db, cotizacion_id)
+
+
 @router.get("/{cotizacion_id}/margen", response_model=OpeCotizacionMargenResponse)
 def margen(
     cotizacion_id: uuid.UUID,

@@ -98,20 +98,26 @@ def actualizar_aeropuerto(db: Session, aeropuerto_id: uuid.UUID, data: OpeAeropu
 # Concepto tarifario
 # ---------------------------------------------------------------------------
 
+def _attach_concepto(c: OpeConcepto) -> OpeConcepto:
+    c.cuenta_ingreso_nombre = f"{c.cuenta_ingreso.codigo} — {c.cuenta_ingreso.nombre}" if c.cuenta_ingreso else None
+    c.tarifa_iva_nombre = c.tarifa_iva.nombre if c.tarifa_iva else None
+    return c
+
+
 def listar_conceptos(db: Session, seccion: str | None = None, solo_activos: bool = True) -> list[OpeConcepto]:
     q = db.query(OpeConcepto)
     if solo_activos:
         q = q.filter(OpeConcepto.activo == True)
     if seccion:
         q = q.filter(OpeConcepto.seccion == seccion)
-    return q.order_by(OpeConcepto.seccion, OpeConcepto.nombre).all()
+    return [_attach_concepto(c) for c in q.order_by(OpeConcepto.seccion, OpeConcepto.nombre).all()]
 
 
 def obtener_concepto(db: Session, concepto_id: uuid.UUID) -> OpeConcepto:
     c = db.query(OpeConcepto).filter(OpeConcepto.id == concepto_id).first()
     if not c:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Concepto no encontrado")
-    return c
+    return _attach_concepto(c)
 
 
 def crear_concepto(db: Session, data: OpeConceptoCreate, actor: UsuarioActual) -> OpeConcepto:
@@ -119,7 +125,7 @@ def crear_concepto(db: Session, data: OpeConceptoCreate, actor: UsuarioActual) -
     db.add(c)
     db.commit()
     db.refresh(c)
-    return c
+    return _attach_concepto(c)
 
 
 def actualizar_concepto(db: Session, concepto_id: uuid.UUID, data: OpeConceptoUpdate, actor: UsuarioActual) -> OpeConcepto:
@@ -130,4 +136,4 @@ def actualizar_concepto(db: Session, concepto_id: uuid.UUID, data: OpeConceptoUp
     c.modificado_en = datetime.now(timezone.utc)
     db.commit()
     db.refresh(c)
-    return c
+    return _attach_concepto(c)

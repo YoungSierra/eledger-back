@@ -51,6 +51,8 @@ class FacFactura(Base, AuditMixin):
     fecha_vencimiento: Mapped[date] = mapped_column(Date, nullable=False)
     periodo_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_periodo.id"), nullable=False)
     cliente_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=False)
+    # Cotización de venta que origina la factura (módulo ope_). Una factura = una cotización.
+    cotizacion_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_cotizacion.id"), nullable=True, index=True)
     moneda_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_moneda.id"), nullable=False)
     trm: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
     condicion_pago_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_condicion_pago.id"), nullable=True)
@@ -106,6 +108,10 @@ class FacFacturaLinea(Base):
     cuenta_ingreso_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
     centro_costo_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_centro_costo.id"), nullable=True)
     remision_linea_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("inv_remision_linea.id"), nullable=True)
+    # Línea de cotización facturada + monto facturado en la MONEDA NATIVA de la
+    # cotización (para el seguimiento de saldo, independiente de la moneda de la factura).
+    cotizacion_linea_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_cotizacion_linea.id"), nullable=True, index=True)
+    monto_cotizacion: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
     orden: Mapped[int] = mapped_column(SmallInteger, default=1, nullable=False)
 
     factura: Mapped["FacFactura"] = relationship("FacFactura", back_populates="lineas")

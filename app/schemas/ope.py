@@ -109,6 +109,8 @@ class OpeConceptoCreate(BaseModel):
     tipo_calculo: TipoCalculoType
     moneda: MonedaType
     cuenta_id: Optional[uuid.UUID] = None
+    cuenta_ingreso_id: Optional[uuid.UUID] = None
+    tarifa_iva_id: Optional[uuid.UUID] = None
 
 
 class OpeConceptoUpdate(BaseModel):
@@ -117,6 +119,8 @@ class OpeConceptoUpdate(BaseModel):
     tipo_calculo: Optional[TipoCalculoType] = None
     moneda: Optional[MonedaType] = None
     cuenta_id: Optional[uuid.UUID] = None
+    cuenta_ingreso_id: Optional[uuid.UUID] = None
+    tarifa_iva_id: Optional[uuid.UUID] = None
     activo: Optional[bool] = None
 
 
@@ -127,6 +131,10 @@ class OpeConceptoResponse(BaseModel):
     tipo_calculo: TipoCalculoType
     moneda: MonedaType
     cuenta_id: Optional[uuid.UUID]
+    cuenta_ingreso_id: Optional[uuid.UUID] = None
+    cuenta_ingreso_nombre: Optional[str] = None
+    tarifa_iva_id: Optional[uuid.UUID] = None
+    tarifa_iva_nombre: Optional[str] = None
     activo: bool
     creado_en: datetime
 
@@ -301,6 +309,7 @@ class OpeCotizacionSummary(BaseModel):
     destino: str
     asesor_id: Optional[uuid.UUID] = None
     asesor_nombre: Optional[str] = None
+    operacion_id: Optional[uuid.UUID] = None
     estado: EstadoCotizacionType
     trm: Optional[Decimal]
     creado_en: datetime

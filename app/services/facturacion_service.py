@@ -3,19 +3,22 @@ from datetime import datetime, date, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.admin import AdmCondicionPago, AdmMoneda, AdmTipoDocumento
+from app.models.admin import AdmCondicionPago, AdmMoneda, AdmTarifaIva, AdmTipoDocumento
 from app.models.adm import AdmTercero
 from app.models.contabilidad import CntAsiento, CntAsientoLinea, CntCentroCosto, CntCuenta, CntPeriodo
 from app.models.cxc import CxcDocumento, CxcParametroContable
 from app.models.facturacion import FacFactura, FacFacturaLinea, FacFacturaRetencion, FacResolucion
 from app.models.inventario import InvProducto, InvFamilia, InvTipoProducto, InvUnidadMedida
+from app.models.ope import OpeCotizacion, OpeCotizacionLinea, OpeConcepto
 from app.schemas.auth import UsuarioActual
 from app.schemas.facturacion import (
     FacFacturaCreate, FacFacturaUpdate, AnularFacturaRequest,
     FacFacturaResponse, FacFacturaListItem, FacListResponse,
     LineaFacResponse, RetencionFacResponse,
+    LineaFacCreate, FacturarCotizacionRequest,
 )
 
 CODIGO_FAC = "FAC"
@@ -207,6 +210,8 @@ def _to_linea_response(db: Session, linea: FacFacturaLinea) -> LineaFacResponse:
         centro_costo_id=linea.centro_costo_id,
         centro_costo_codigo=cc_codigo,
         centro_costo_nombre=cc_nombre,
+        cotizacion_linea_id=linea.cotizacion_linea_id,
+        monto_cotizacion=linea.monto_cotizacion,
     )
 
 
@@ -242,6 +247,8 @@ def _to_response(fac: FacFactura, db: Session) -> FacFacturaResponse:
         cliente_email=cliente.email if cliente else None,
         cliente_regimen=cliente.regimen if cliente else None,
         cliente_responsable_iva=cliente.responsable_iva if cliente else False,
+        cotizacion_id=fac.cotizacion_id,
+        cotizacion_numero=(db.get(OpeCotizacion, fac.cotizacion_id).numero if fac.cotizacion_id else None),
         moneda_id=fac.moneda_id,
         moneda_codigo=moneda.codigo if moneda else "",
         trm=fac.trm,
@@ -319,6 +326,8 @@ def _persistir_lineas(db: Session, fac_id: uuid.UUID, lineas_data) -> None:
             total=ld.total,
             cuenta_ingreso_id=ld.cuenta_ingreso_id,
             centro_costo_id=ld.centro_costo_id,
+            cotizacion_linea_id=getattr(ld, "cotizacion_linea_id", None),
+            monto_cotizacion=getattr(ld, "monto_cotizacion", None),
         ))
 
 
@@ -368,9 +377,67 @@ def obtener(db: Session, id: uuid.UUID) -> FacFacturaResponse:
     return _to_response(fac, db)
 
 
+def _facturado_por_linea(db: Session, cotizacion_id: uuid.UUID, excluir_factura_id: uuid.UUID | None = None) -> dict:
+    """Monto ya facturado por línea de cotización (facturas no anuladas), en su moneda nativa."""
+    q = (
+        db.query(FacFacturaLinea.cotizacion_linea_id, func.coalesce(func.sum(FacFacturaLinea.monto_cotizacion), 0))
+        .join(FacFactura, FacFacturaLinea.factura_id == FacFactura.id)
+        .filter(FacFactura.cotizacion_id == cotizacion_id, FacFactura.estado != "anulada",
+                FacFacturaLinea.cotizacion_linea_id.isnot(None))
+    )
+    if excluir_factura_id:
+        q = q.filter(FacFactura.id != excluir_factura_id)
+    return {lid: Decimal(str(m or 0)) for lid, m in q.group_by(FacFacturaLinea.cotizacion_linea_id).all()}
+
+
+def estado_facturacion_cotizacion(db: Session, cotizacion_id: uuid.UUID) -> dict:
+    cot = db.get(OpeCotizacion, cotizacion_id)
+    if not cot:
+        raise HTTPException(status_code=404, detail="Cotización no encontrada")
+    facturado = _facturado_por_linea(db, cotizacion_id)
+    lineas, algo_fact, algo_pend = [], False, False
+    TOL = Decimal("0.0001")
+    for l in sorted(cot.lineas, key=lambda x: (x.seccion, x.orden)):
+        fact = facturado.get(l.id, Decimal("0"))
+        pend = Decimal(str(l.total_venta)) - fact
+        if fact > TOL:
+            algo_fact = True
+        if pend > TOL:
+            algo_pend = True
+        lineas.append({
+            "linea_id": str(l.id), "seccion": l.seccion, "descripcion": l.descripcion,
+            "moneda": l.moneda, "total_venta": str(l.total_venta),
+            "facturado": str(fact), "pendiente": str(pend if pend > 0 else Decimal("0")),
+        })
+    estado = "facturada" if (algo_fact and not algo_pend) else ("parcial" if algo_fact else "pendiente")
+    return {"cotizacion_id": str(cot.id), "numero": cot.numero, "estado_facturacion": estado, "lineas": lineas}
+
+
+def _validar_lineas_cotizacion(db: Session, data: FacFacturaCreate) -> None:
+    if not data.cotizacion_id:
+        return
+    facturado = _facturado_por_linea(db, data.cotizacion_id)
+    TOL = Decimal("0.0001")
+    acumulado: dict = {}
+    for ld in data.lineas:
+        lid = getattr(ld, "cotizacion_linea_id", None)
+        if not lid:
+            continue
+        cl = db.get(OpeCotizacionLinea, lid)
+        if not cl or cl.cotizacion_id != data.cotizacion_id:
+            raise HTTPException(status_code=400, detail="Una línea referencia una cotización distinta a la de la factura")
+        monto = Decimal(str(getattr(ld, "monto_cotizacion", None) or 0))
+        acumulado[lid] = acumulado.get(lid, Decimal("0")) + monto
+        pendiente = Decimal(str(cl.total_venta)) - facturado.get(lid, Decimal("0"))
+        if acumulado[lid] - pendiente > TOL:
+            raise HTTPException(status_code=400,
+                detail=f"El monto a facturar de '{cl.descripcion}' excede el pendiente ({pendiente}).")
+
+
 def crear(db: Session, data: FacFacturaCreate, actor: UsuarioActual) -> FacFacturaResponse:
     if not data.lineas:
         raise HTTPException(status_code=400, detail="La factura debe tener al menos una línea")
+    _validar_lineas_cotizacion(db, data)
 
     moneda_func = _moneda_funcional(db)
     if data.moneda_id != moneda_func.id and not data.trm:
@@ -386,6 +453,7 @@ def crear(db: Session, data: FacFacturaCreate, actor: UsuarioActual) -> FacFactu
         fecha=data.fecha, fecha_vencimiento=data.fecha_vencimiento,
         periodo_id=periodo.id,
         cliente_id=data.cliente_id,
+        cotizacion_id=data.cotizacion_id,
         moneda_id=data.moneda_id,
         trm=data.trm if data.moneda_id != moneda_func.id else None,
         condicion_pago_id=data.condicion_pago_id,
@@ -404,6 +472,73 @@ def crear(db: Session, data: FacFacturaCreate, actor: UsuarioActual) -> FacFactu
     db.commit()
     db.refresh(fac)
     return _to_response(fac, db)
+
+
+def facturar_cotizacion(db: Session, cotizacion_id: uuid.UUID, req: FacturarCotizacionRequest, actor: UsuarioActual) -> FacFacturaResponse:
+    """Genera una factura de venta (borrador) desde las líneas de una cotización.
+    El monto de cada línea viene en la moneda nativa de la cotización; se convierte
+    a la moneda de la factura con la TRM de la cotización. Cuenta de ingreso e IVA
+    salen del concepto de cada línea."""
+    cot = db.get(OpeCotizacion, cotizacion_id)
+    if not cot:
+        raise HTTPException(status_code=404, detail="Cotización no encontrada")
+
+    moneda = db.query(AdmMoneda).filter(AdmMoneda.codigo == req.moneda, AdmMoneda.activo == True).first()
+    if not moneda:
+        raise HTTPException(status_code=400, detail=f"Moneda {req.moneda} no encontrada")
+    moneda_func = _moneda_funcional(db)
+    trm = Decimal(str(cot.trm or 0))
+    if moneda.id != moneda_func.id and trm <= 0:
+        raise HTTPException(status_code=400, detail="La cotización no tiene TRM para facturar en moneda extranjera")
+
+    def conv(valor: Decimal, desde: str) -> Decimal:
+        if desde == req.moneda:
+            return valor
+        return (valor / trm) if req.moneda == "USD" else (valor * trm)
+
+    lineas: list[LineaFacCreate] = []
+    for item in req.lineas:
+        monto = Decimal(str(item.monto or 0))
+        if monto <= 0:
+            continue
+        cl = db.get(OpeCotizacionLinea, item.cotizacion_linea_id)
+        if not cl or cl.cotizacion_id != cot.id:
+            raise HTTPException(status_code=400, detail="Una línea no pertenece a esta cotización")
+        concepto = db.get(OpeConcepto, cl.concepto_id) if cl.concepto_id else None
+        if not concepto or not concepto.cuenta_ingreso_id:
+            raise HTTPException(status_code=400,
+                detail=f"El concepto de '{cl.descripcion}' no tiene cuenta de ingreso configurada")
+        tarifa = db.get(AdmTarifaIva, concepto.tarifa_iva_id) if concepto.tarifa_iva_id else None
+        pct = Decimal(str(tarifa.porcentaje)) if tarifa else Decimal("0")
+
+        subtotal = conv(monto, cl.moneda).quantize(Decimal("0.0001"))
+        total_iva = (subtotal * pct / Decimal("100")).quantize(Decimal("0.0001"))
+        lineas.append(LineaFacCreate(
+            descripcion=cl.descripcion,
+            cantidad=Decimal("1"),
+            precio_unitario=subtotal,
+            subtotal=subtotal,
+            iva_tipo="GRAVADO" if pct > 0 else "NINGUNO",
+            iva_pct=pct,
+            total_iva=total_iva,
+            cuenta_iva_id=tarifa.cuenta_iva_ventas_id if tarifa else None,
+            total=subtotal + total_iva,
+            cuenta_ingreso_id=concepto.cuenta_ingreso_id,
+            cotizacion_linea_id=cl.id,
+            monto_cotizacion=monto,
+        ))
+
+    if not lineas:
+        raise HTTPException(status_code=400, detail="Selecciona al menos una línea con monto a facturar")
+
+    data = FacFacturaCreate(
+        fecha=req.fecha, fecha_vencimiento=req.fecha_vencimiento,
+        cliente_id=cot.cliente_id, cotizacion_id=cot.id,
+        moneda_id=moneda.id, trm=(trm if moneda.id != moneda_func.id else None),
+        condicion_pago_id=req.condicion_pago_id, notas=req.notas,
+        lineas=lineas, retenciones=[],
+    )
+    return crear(db, data, actor)
 
 
 def actualizar(db: Session, id: uuid.UUID, data: FacFacturaUpdate, actor: UsuarioActual) -> FacFacturaResponse:

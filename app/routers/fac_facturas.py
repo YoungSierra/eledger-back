@@ -7,7 +7,7 @@ from app.core.deps import get_current_user
 from app.schemas.auth import UsuarioActual
 from app.schemas.facturacion import (
     FacFacturaCreate, FacFacturaUpdate, AnularFacturaRequest,
-    FacFacturaResponse, FacListResponse,
+    FacFacturaResponse, FacListResponse, FacturarCotizacionRequest,
 )
 from app.services import facturacion_service
 
@@ -36,6 +36,16 @@ def crear(
     actor: UsuarioActual = Depends(get_current_user),
 ):
     return facturacion_service.crear(db, body, actor)
+
+
+@router.post("/desde-cotizacion/{cotizacion_id}", response_model=FacFacturaResponse, status_code=201)
+def facturar_cotizacion(
+    cotizacion_id: uuid.UUID,
+    body: FacturarCotizacionRequest,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return facturacion_service.facturar_cotizacion(db, cotizacion_id, body, actor)
 
 
 @router.get("/{id}", response_model=FacFacturaResponse)
