@@ -635,6 +635,41 @@ def anular(db: Session, id: uuid.UUID, data: AnularRequest, actor: UsuarioActual
         CxcAplicacion.estado == "pendiente",
     ).delete()
 
+    # Si está contabilizado: validar período y generar contraasiento que reversa el original.
+    if doc.estado == "contabilizado":
+        periodo = db.get(CntPeriodo, doc.periodo_id)
+        if not periodo or periodo.estado != "abierto":
+            raise HTTPException(status_code=400, detail="El período contable no está abierto. No se puede anular.")
+        if doc.asiento_id:
+            asiento_orig = db.get(CntAsiento, doc.asiento_id)
+            if asiento_orig:
+                lineas_orig = db.query(CntAsientoLinea).filter(CntAsientoLinea.asiento_id == asiento_orig.id).all()
+                td = db.query(AdmTipoDocumento).filter(AdmTipoDocumento.codigo == "ANU").first()
+                contra = CntAsiento(
+                    id=uuid.uuid4(),
+                    tipo_documento_id=td.id if td else asiento_orig.tipo_documento_id,
+                    documento_numero=f"ANU-{doc.numero}",
+                    fecha=date.today(),
+                    periodo_id=doc.periodo_id,
+                    descripcion=f"ANULACIÓN {doc.tipo} {doc.numero} — {data.motivo}",
+                    estado="publicado",
+                    moneda_id=asiento_orig.moneda_id,
+                    trm=asiento_orig.trm,
+                    documento_origen_id=doc.id,
+                    documento_origen_tipo="cxc_documento_anulacion",
+                    creado_por=uuid.UUID(actor.id),
+                )
+                db.add(contra)
+                db.flush()
+                for i, l in enumerate(lineas_orig, start=1):
+                    db.add(CntAsientoLinea(
+                        id=uuid.uuid4(), asiento_id=contra.id, orden=i,
+                        cuenta_id=l.cuenta_id,
+                        debito=l.credito, credito=l.debito,
+                        debito_funcional=l.credito_funcional, credito_funcional=l.debito_funcional,
+                        tercero_id=l.tercero_id,
+                    ))
+
     doc.estado = "anulado"
     doc.saldo = Decimal("0")
     doc.modificado_por = uuid.UUID(actor.id)

@@ -668,6 +668,9 @@ def confirmar_recepcion(db: Session, rec_id: uuid.UUID, actor: UsuarioActual) ->
         raise HTTPException(status_code=400, detail=f"La recepción ya está en estado '{rec.estado}'")
     if not rec.lineas:
         raise HTTPException(status_code=400, detail="La recepción no tiene líneas")
+    periodo = db.get(CntPeriodo, rec.periodo_id) if rec.periodo_id else None
+    if not periodo or periodo.estado != "abierto":
+        raise HTTPException(status_code=400, detail="El período contable no está abierto")
 
     actor_id = uuid.UUID(actor.id)
     ahora = datetime.now(timezone.utc)

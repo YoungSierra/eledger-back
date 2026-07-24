@@ -589,9 +589,18 @@ def facturar_cotizacion(db: Session, cotizacion_id: uuid.UUID, req: FacturarCoti
     if not moneda:
         raise HTTPException(status_code=400, detail=f"Moneda {req.moneda} no encontrada")
     moneda_func = _moneda_funcional(db)
-    trm = Decimal(str(cot.trm or 0))
+    # En factura prevalece la TRM del DÍA (no la de la cotización).
+    from app.models.admin import AdmTrm
+    hoy = date.today()
+    trm_row = (
+        db.query(AdmTrm)
+        .filter(AdmTrm.fecha >= datetime(hoy.year, hoy.month, hoy.day),
+                AdmTrm.fecha < datetime(hoy.year, hoy.month, hoy.day, 23, 59, 59))
+        .first()
+    )
+    trm = Decimal(str(trm_row.tasa)) if trm_row and trm_row.tasa else Decimal("0")
     if moneda.id != moneda_func.id and trm <= 0:
-        raise HTTPException(status_code=400, detail="La cotización no tiene TRM para facturar en moneda extranjera")
+        raise HTTPException(status_code=400, detail="No hay TRM del día registrada. Regístrala para facturar en moneda extranjera.")
 
     def conv(valor: Decimal, desde: str) -> Decimal:
         if desde == req.moneda:
