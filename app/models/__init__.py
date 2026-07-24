@@ -42,3 +42,4 @@ from app.models.ope import (
     OpeEvento,
     OpeDocumento,
 )
+from app.models.req import ReqRequerimiento, ReqMensaje

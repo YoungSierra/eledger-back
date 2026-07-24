@@ -154,6 +154,7 @@ def listar(
     tipo_documento_id: uuid.UUID | None = None,
     fecha_desde: str | None = None,
     fecha_hasta: str | None = None,
+    tercero_id: uuid.UUID | None = None,
 ) -> AsientoListResponse:
     q = (
         db.query(CntAsiento)
@@ -168,6 +169,9 @@ def listar(
         q = q.filter(CntAsiento.fecha >= fecha_desde)
     if fecha_hasta:
         q = q.filter(CntAsiento.fecha <= fecha_hasta)
+    if tercero_id:
+        # El tercero vive en las líneas; se filtran los asientos que lo contengan.
+        q = q.filter(CntAsiento.lineas.any(CntAsientoLinea.tercero_id == tercero_id))
 
     total = q.count()
     rows = q.order_by(CntAsiento.numero.desc()).offset((pagina - 1) * por_pagina).limit(por_pagina).all()

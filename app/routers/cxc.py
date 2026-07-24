@@ -13,9 +13,37 @@ from app.schemas.cxc import (
     CxcDocumentoResponse, CxcListResponse, CxcResumenResponse,
     ReciboCreate, FacturaPendienteItem, AplicacionPendienteItem,
 )
+from app.schemas.facturacion import PreviewAsientoResponse
 from app.services import cxc_service
 
 router = APIRouter(prefix="/cxc", tags=["CxC — Cuentas por cobrar"])
+
+
+@router.post("/preview-asiento", response_model=PreviewAsientoResponse)
+def preview_asiento_documento(
+    body: CxcDocumentoCreate,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxc_service.preview_asiento_documento(db, body)
+
+
+@router.post("/recibo/preview-asiento", response_model=PreviewAsientoResponse)
+def preview_asiento_recibo(
+    body: ReciboCreate,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxc_service.preview_asiento_recibo(db, body)
+
+
+@router.get("/{id}/asiento", response_model=PreviewAsientoResponse)
+def asiento_contabilizado(
+    id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxc_service.asiento_contabilizado(db, id)
 
 
 @router.get("/facturas-pendientes", response_model=list[FacturaPendienteItem])

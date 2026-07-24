@@ -6,7 +6,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, field_validator, model_validator
 
 
-TipoDoc = Literal["FACTURA", "COMPROBANTE", "NOTA_CREDITO", "NOTA_DEBITO", "ANTICIPO"]
+TipoDoc = Literal["FACTURA", "COMPROBANTE", "NOTA_CREDITO", "NOTA_DEBITO", "ANTICIPO", "VRT"]
 EstadoDoc = Literal["borrador", "contabilizado", "anulado"]
 
 
@@ -163,6 +163,7 @@ class FacturaPendienteCxpItem(BaseModel):
     aplicado: Decimal
     saldo: Decimal
     dias_vencimiento: Optional[int] = None
+    tipo: str = "FACTURA"
     model_config = {"from_attributes": True}
 
 
@@ -266,3 +267,27 @@ class CxpResumenResponse(BaseModel):
     total_61_90: Decimal
     total_mas_90: Decimal
     total_general: Decimal
+
+
+class VrtItem(BaseModel):
+    id: uuid.UUID
+    numero: str
+    fecha: date
+    tercero_id: uuid.UUID
+    tercero_nit: Optional[str] = None
+    tercero_nombre: Optional[str] = None
+    valor: Decimal
+    saldo: Decimal
+    estado_pago: str  # pendiente | pagado | anulado
+    factura_id: Optional[uuid.UUID] = None
+    factura_numero: Optional[str] = None
+    cliente_nombre: Optional[str] = None
+    comprobante_numero: Optional[str] = None
+    fecha_pago: Optional[date] = None
+
+
+class VrtListResponse(BaseModel):
+    items: list[VrtItem]
+    total: int
+    pagina: int
+    por_pagina: int

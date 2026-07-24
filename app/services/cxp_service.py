@@ -25,6 +25,7 @@ TIPO_A_CODIGO = {
     "NOTA_CREDITO": "NCC",
     "NOTA_DEBITO":  "NDB",
     "ANTICIPO":     "ANTP",
+    "VRT":          "VRT",
 }
 
 
@@ -149,6 +150,61 @@ def _poblar_lineas_asiento(
 def _get_fallback_cxp_id(db: Session) -> uuid.UUID | None:
     params = db.query(CxpParametroContable).first()
     return params.cuenta_proveedores_id if params else None
+
+
+def preview_asiento_documento(db: Session, data) -> "PreviewAsientoResponse":
+    """Previsualiza el asiento de una factura/nota de CxP desde el payload (sin guardar)."""
+    from app.schemas.facturacion import PreviewAsientoResponse, PreviewAsientoLinea
+    from app.models.cxp import CxpLineaRetencion as _Ret
+    avisos: list[str] = []
+    fallback = _get_fallback_cxp_id(db)
+    tercero_nombre = _get_tercero_nombre(db, data.tercero_id)
+    lineas_out: list[PreviewAsientoLinea] = []
+
+    def add(cuenta: CntCuenta | None, debito, credito, cc_id=None):
+        cc_txt = None
+        if cc_id:
+            from app.models.contabilidad import CntCentroCosto
+            cc = db.get(CntCentroCosto, cc_id)
+            cc_txt = f"{cc.codigo} {cc.nombre}" if cc else None
+        lineas_out.append(PreviewAsientoLinea(
+            cuenta_codigo=cuenta.codigo if cuenta else None,
+            cuenta_nombre=cuenta.nombre if cuenta else "(sin cuenta)",
+            tercero_nombre=tercero_nombre, centro_costo=cc_txt,
+            debito=debito, credito=credito,
+        ))
+
+    for ld in sorted(data.lineas, key=lambda l: l.orden):
+        # Línea transitoria para reutilizar los resolvers.
+        tmp = CxpDocumentoLinea(
+            concepto_id=ld.concepto_id, cuenta_id=ld.cuenta_id,
+            subtotal=ld.subtotal, total_iva=ld.total_iva,
+            cuenta_iva_id=ld.cuenta_iva_id, centro_costo_id=ld.centro_costo_id,
+        )
+        cuenta_gasto = _resolver_cuenta_gasto(db, tmp)
+        if not cuenta_gasto:
+            avisos.append(f"Línea '{ld.descripcion}': sin cuenta de gasto (revisa el concepto o la cuenta).")
+        cuenta_cxp = _resolver_cuenta_cxp(db, tmp, fallback)
+        if not cuenta_cxp:
+            avisos.append(f"Línea '{ld.descripcion}': sin cuenta de proveedores (concepto o Parámetros CxP).")
+        add(cuenta_gasto, ld.subtotal, Decimal("0"), ld.centro_costo_id)
+        if ld.total_iva > 0 and ld.cuenta_iva_id:
+            add(db.get(CntCuenta, ld.cuenta_iva_id), ld.total_iva, Decimal("0"))
+        ret_total = Decimal("0")
+        for r in getattr(ld, "retenciones", []) or []:
+            add(db.get(CntCuenta, r.cuenta_id) if r.cuenta_id else None, Decimal("0"), r.valor)
+            ret_total += r.valor
+        neto = ld.subtotal + ld.total_iva - ret_total
+        add(cuenta_cxp, Decimal("0"), neto)
+
+    total_d = sum((l.debito for l in lineas_out), Decimal("0"))
+    total_c = sum((l.credito for l in lineas_out), Decimal("0"))
+    moneda = db.get(AdmMoneda, data.moneda_id)
+    return PreviewAsientoResponse(
+        lineas=lineas_out, total_debito=total_d, total_credito=total_c,
+        cuadra=abs(total_d - total_c) <= Decimal("0.01"),
+        moneda_codigo=moneda.codigo if moneda else None, avisos=avisos,
+    )
 
 
 def _generar_asiento(db: Session, doc: CxpDocumento, actor: UsuarioActual) -> CntAsiento | None:
@@ -323,7 +379,7 @@ def listar(
 
     total = q.count()
     hoy = date.today()
-    rows = q.order_by(CxpDocumento.fecha.desc()).offset((pagina - 1) * por_pagina).limit(por_pagina).all()
+    rows = q.order_by(CxpDocumento.fecha.desc(), CxpDocumento.creado_en.desc()).offset((pagina - 1) * por_pagina).limit(por_pagina).all()
     return CxpListResponse(
         items=[_to_list_item(r, db, hoy) for r in rows],
         total=total, pagina=pagina, por_pagina=por_pagina,
@@ -393,7 +449,7 @@ def facturas_pendientes_cxp(
         .filter(
             CxpDocumento.activo == True,
             CxpDocumento.tercero_id == tercero_id,
-            CxpDocumento.tipo == "FACTURA",
+            CxpDocumento.tipo.in_(["FACTURA", "VRT"]),
             CxpDocumento.estado == "contabilizado",
             CxpDocumento.saldo > 0,
         )
@@ -417,7 +473,7 @@ def facturas_pendientes_cxp(
             id=d.id, numero=d.numero, fecha=d.fecha,
             fecha_vencimiento=d.fecha_vencimiento,
             total=d.total, aplicado=(d.total - d.saldo) + pendiente,
-            saldo=saldo_disp, dias_vencimiento=dias,
+            saldo=saldo_disp, dias_vencimiento=dias, tipo=d.tipo,
         ))
     return result
 
@@ -443,6 +499,104 @@ def aplicaciones_comprobante(db: Session, comprobante_id: uuid.UUID) -> list[Apl
             valor=ap.valor,
         ))
     return result
+
+
+def _cuenta_pago_documento(db: Session, debito_doc: CxpDocumento | None, cuenta_prov: CntCuenta) -> uuid.UUID:
+    """Cuenta a debitar al pagar un documento: para VRT es su propia cuenta (2815),
+    para el resto la cuenta de proveedores parametrizada."""
+    if debito_doc and debito_doc.tipo == "VRT":
+        linea = db.query(CxpDocumentoLinea).filter(
+            CxpDocumentoLinea.documento_id == debito_doc.id,
+            CxpDocumentoLinea.cuenta_id.isnot(None),
+        ).first()
+        if linea and linea.cuenta_id:
+            return linea.cuenta_id
+    return cuenta_prov.id
+
+
+def preview_asiento_comprobante(db: Session, data) -> "PreviewAsientoResponse":
+    """Previsualiza el asiento del comprobante de pago desde el payload (sin guardar)."""
+    from app.schemas.facturacion import PreviewAsientoResponse, PreviewAsientoLinea
+    avisos: list[str] = []
+    fallback_cxp_id = _get_fallback_cxp_id(db)
+    cuenta_prov = db.get(CntCuenta, fallback_cxp_id) if fallback_cxp_id else None
+    if not cuenta_prov:
+        avisos.append("No hay cuenta de proveedores parametrizada (Parámetros CxP).")
+    ban_cuenta = db.get(BanCuenta, data.ban_cuenta_id) if data.ban_cuenta_id else None
+    banco_cta = db.get(CntCuenta, ban_cuenta.cuenta_contable_id) if ban_cuenta and ban_cuenta.cuenta_contable_id else None
+    if not banco_cta:
+        avisos.append("La cuenta bancaria no tiene cuenta contable parametrizada.")
+
+    tercero_nombre = _get_tercero_nombre(db, data.tercero_id)
+    lineas_out = []
+
+    # Débitos por documento aplicado (FACTURA → proveedores; VRT → su cuenta 2815).
+    debitos: dict = {}
+    for ap in data.aplicaciones:
+        ddoc = db.get(CxpDocumento, ap.factura_id)
+        cta_id = _cuenta_pago_documento(db, ddoc, cuenta_prov) if cuenta_prov else None
+        debitos[cta_id] = debitos.get(cta_id, Decimal("0")) + ap.valor
+    for cta_id, val in debitos.items():
+        c = db.get(CntCuenta, cta_id) if cta_id else None
+        lineas_out.append(PreviewAsientoLinea(
+            cuenta_codigo=c.codigo if c else None,
+            cuenta_nombre=c.nombre if c else "(sin cuenta)",
+            tercero_nombre=tercero_nombre, centro_costo=None,
+            debito=val, credito=Decimal("0"),
+        ))
+    # Crédito banco
+    lineas_out.append(PreviewAsientoLinea(
+        cuenta_codigo=banco_cta.codigo if banco_cta else None,
+        cuenta_nombre=banco_cta.nombre if banco_cta else "(sin cuenta banco)",
+        tercero_nombre=tercero_nombre, centro_costo=None,
+        debito=Decimal("0"), credito=data.valor_pagado,
+    ))
+
+    total_d = sum((l.debito for l in lineas_out), Decimal("0"))
+    total_c = sum((l.credito for l in lineas_out), Decimal("0"))
+    moneda = db.get(AdmMoneda, data.moneda_id)
+    return PreviewAsientoResponse(
+        lineas=lineas_out, total_debito=total_d, total_credito=total_c,
+        cuadra=abs(total_d - total_c) <= Decimal("0.01"),
+        moneda_codigo=moneda.codigo if moneda else None, avisos=avisos,
+    )
+
+
+def asiento_contabilizado(db: Session, id: uuid.UUID) -> "PreviewAsientoResponse":
+    """Devuelve las líneas del asiento REAL ya contabilizado de un documento CxP,
+    en el mismo formato que el preview."""
+    from app.schemas.facturacion import PreviewAsientoResponse, PreviewAsientoLinea
+    doc = db.query(CxpDocumento).filter(CxpDocumento.id == id).first()
+    if not doc or not doc.asiento_id:
+        return PreviewAsientoResponse(
+            lineas=[], total_debito=Decimal("0"), total_credito=Decimal("0"),
+            cuadra=True, moneda_codigo=None,
+            avisos=["El documento aún no tiene asiento contabilizado."],
+        )
+    asiento = db.get(CntAsiento, doc.asiento_id)
+    lineas = db.query(CntAsientoLinea).filter(
+        CntAsientoLinea.asiento_id == doc.asiento_id
+    ).order_by(CntAsientoLinea.orden).all()
+    out = []
+    for l in lineas:
+        c = db.get(CntCuenta, l.cuenta_id) if l.cuenta_id else None
+        terc = db.get(AdmTercero, l.tercero_id) if l.tercero_id else None
+        out.append(PreviewAsientoLinea(
+            cuenta_codigo=c.codigo if c else None,
+            cuenta_nombre=c.nombre if c else None,
+            tercero_nombre=terc.razon_social if terc else None,
+            centro_costo=None,
+            debito=l.debito, credito=l.credito,
+        ))
+    total_d = sum((l.debito for l in lineas), Decimal("0"))
+    total_c = sum((l.credito for l in lineas), Decimal("0"))
+    moneda = db.get(AdmMoneda, doc.moneda_id)
+    return PreviewAsientoResponse(
+        lineas=out, total_debito=total_d, total_credito=total_c,
+        cuadra=abs(total_d - total_c) <= Decimal("0.01"),
+        moneda_codigo=moneda.codigo if moneda else None, avisos=[],
+        asiento_numero=asiento.numero if asiento else None,
+    )
 
 
 def _generar_asiento_comprobante(db: Session, doc: CxpDocumento, actor: UsuarioActual) -> CntAsiento | None:
@@ -490,7 +644,21 @@ def _generar_asiento_comprobante(db: Session, doc: CxpDocumento, actor: UsuarioA
             tercero_id=doc.tercero_id,
         ))
 
-    add(cuenta_prov.id, doc.total, Decimal("0"))
+    # Débito por documento aplicado: FACTURA → cuenta proveedores; VRT → su cuenta 2815.
+    apps = db.query(CxpAplicacion).filter(
+        CxpAplicacion.documento_credito_id == doc.id,
+        CxpAplicacion.estado.in_(["pendiente", "aplicado"]),
+    ).all()
+    debitos_por_cuenta: dict = {}
+    for ap in apps:
+        ddoc = db.get(CxpDocumento, ap.documento_debito_id)
+        cta = _cuenta_pago_documento(db, ddoc, cuenta_prov)
+        debitos_por_cuenta[cta] = debitos_por_cuenta.get(cta, Decimal("0")) + ap.valor
+    if debitos_por_cuenta:
+        for cta, val in debitos_por_cuenta.items():
+            add(cta, val, Decimal("0"))
+    else:
+        add(cuenta_prov.id, doc.total, Decimal("0"))
     add(ban_cuenta.cuenta_contable_id, Decimal("0"), doc.total)
     return asiento
 
@@ -512,13 +680,13 @@ def crear_comprobante(db: Session, data: ComprobanteCreate, actor: UsuarioActual
         fac = db.query(CxpDocumento).filter(
             CxpDocumento.id == ap.factura_id,
             CxpDocumento.activo == True,
-            CxpDocumento.tipo == "FACTURA",
+            CxpDocumento.tipo.in_(["FACTURA", "VRT"]),
             CxpDocumento.estado == "contabilizado",
         ).first()
         if not fac:
-            raise HTTPException(status_code=400, detail=f"Factura {ap.factura_id} no encontrada o no contabilizada")
+            raise HTTPException(status_code=400, detail=f"Documento {ap.factura_id} no encontrado o no contabilizado")
         if fac.tercero_id != data.tercero_id:
-            raise HTTPException(status_code=400, detail=f"La factura {fac.numero} no pertenece al proveedor seleccionado")
+            raise HTTPException(status_code=400, detail=f"El documento {fac.numero} no pertenece al tercero seleccionado")
         pendiente_otros = db.query(
             __import__("sqlalchemy").func.coalesce(
                 __import__("sqlalchemy").func.sum(CxpAplicacion.valor), Decimal("0")
@@ -590,13 +758,13 @@ def actualizar_comprobante(db: Session, comprobante_id: uuid.UUID, data: Comprob
         fac = db.query(CxpDocumento).filter(
             CxpDocumento.id == ap.factura_id,
             CxpDocumento.activo == True,
-            CxpDocumento.tipo == "FACTURA",
+            CxpDocumento.tipo.in_(["FACTURA", "VRT"]),
             CxpDocumento.estado == "contabilizado",
         ).first()
         if not fac:
-            raise HTTPException(status_code=400, detail=f"Factura {ap.factura_id} no encontrada")
+            raise HTTPException(status_code=400, detail=f"Documento {ap.factura_id} no encontrado")
         if fac.tercero_id != data.tercero_id:
-            raise HTTPException(status_code=400, detail=f"La factura {fac.numero} no pertenece al proveedor")
+            raise HTTPException(status_code=400, detail=f"El documento {fac.numero} no pertenece al tercero")
         app_actual = db.query(CxpAplicacion).filter(
             CxpAplicacion.documento_credito_id == comprobante_id,
             CxpAplicacion.documento_debito_id == ap.factura_id,
@@ -651,14 +819,22 @@ def actualizar_comprobante(db: Session, comprobante_id: uuid.UUID, data: Comprob
         cuenta_prov = db.get(CntCuenta, fallback) if fallback else None
         if cuenta_prov and ban_cta and ban_cta.cuenta_contable_id:
             trm = doc.trm or Decimal("1")
-            for debito, credito, cta in [
-                (doc.total, Decimal("0"), cuenta_prov.id),
-                (Decimal("0"), doc.total, ban_cta.cuenta_contable_id),
-            ]:
+            apps_asi = db.query(CxpAplicacion).filter(
+                CxpAplicacion.documento_credito_id == doc.id,
+                CxpAplicacion.estado.in_(["pendiente", "aplicado"]),
+            ).all()
+            debitos_por_cuenta: dict = {}
+            for ap in apps_asi:
+                ddoc = db.get(CxpDocumento, ap.documento_debito_id)
+                cta = _cuenta_pago_documento(db, ddoc, cuenta_prov)
+                debitos_por_cuenta[cta] = debitos_por_cuenta.get(cta, Decimal("0")) + ap.valor
+            movimientos = [(v, Decimal("0"), c) for c, v in debitos_por_cuenta.items()] or [(doc.total, Decimal("0"), cuenta_prov.id)]
+            movimientos.append((Decimal("0"), doc.total, ban_cta.cuenta_contable_id))
+            for orden_l, (debito, credito, cta) in enumerate(movimientos, start=1):
                 d_f = (debito * trm).quantize(Decimal("0.0001")) if doc.moneda_id != moneda_func2.id else debito
                 c_f = (credito * trm).quantize(Decimal("0.0001")) if doc.moneda_id != moneda_func2.id else credito
                 db.add(CntAsientoLinea(
-                    id=uuid.uuid4(), asiento_id=asiento.id, orden=1,
+                    id=uuid.uuid4(), asiento_id=asiento.id, orden=orden_l,
                     cuenta_id=cta, debito=debito, credito=credito,
                     debito_funcional=d_f, credito_funcional=c_f,
                     tercero_id=doc.tercero_id,
@@ -673,6 +849,65 @@ def actualizar_comprobante(db: Session, comprobante_id: uuid.UUID, data: Comprob
     return _to_response(doc, db)
 
 
+def listar_vrt(
+    db: Session, tercero_id: uuid.UUID | None = None, estado: str | None = None,
+    fecha_desde: str | None = None, fecha_hasta: str | None = None,
+    pagina: int = 1, por_pagina: int = 50,
+):
+    from app.schemas.cxp import VrtItem, VrtListResponse
+    from app.models.facturacion import FacFactura
+    q = db.query(CxpDocumento).filter(CxpDocumento.activo == True, CxpDocumento.tipo == "VRT")
+    if tercero_id:
+        q = q.filter(CxpDocumento.tercero_id == tercero_id)
+    if estado == "pendiente":
+        q = q.filter(CxpDocumento.saldo > 0, CxpDocumento.estado == "contabilizado")
+    elif estado == "pagado":
+        q = q.filter(CxpDocumento.saldo <= 0, CxpDocumento.estado == "contabilizado")
+    elif estado == "anulado":
+        q = q.filter(CxpDocumento.estado == "anulado")
+    if fecha_desde:
+        q = q.filter(CxpDocumento.fecha >= fecha_desde)
+    if fecha_hasta:
+        q = q.filter(CxpDocumento.fecha <= fecha_hasta)
+    total = q.count()
+    rows = (q.order_by(CxpDocumento.fecha.desc(), CxpDocumento.creado_en.desc())
+            .offset((pagina - 1) * por_pagina).limit(por_pagina).all())
+
+    items = []
+    for d in rows:
+        tercero = db.get(AdmTercero, d.tercero_id)
+        fac = db.get(FacFactura, d.origen_id) if d.origen_modulo == "fac_factura" and d.origen_id else None
+        cliente = db.get(AdmTercero, fac.cliente_id) if fac else None
+        if d.estado == "anulado":
+            estado_pago = "anulado"
+        elif d.saldo > 0:
+            estado_pago = "pendiente"
+        else:
+            estado_pago = "pagado"
+        comp_num, fecha_pago = None, None
+        aps = db.query(CxpAplicacion).filter(
+            CxpAplicacion.documento_debito_id == d.id,
+            CxpAplicacion.estado == "aplicado",
+        ).all()
+        comps = [db.get(CxpDocumento, a.documento_credito_id) for a in aps]
+        comps = [c for c in comps if c]
+        if comps:
+            comp_num = ", ".join(c.numero for c in comps)
+            fecha_pago = max(c.fecha for c in comps)
+        items.append(VrtItem(
+            id=d.id, numero=d.numero, fecha=d.fecha,
+            tercero_id=d.tercero_id,
+            tercero_nit=tercero.nit if tercero else None,
+            tercero_nombre=tercero.razon_social if tercero else None,
+            valor=d.total, saldo=d.saldo, estado_pago=estado_pago,
+            factura_id=fac.id if fac else None,
+            factura_numero=fac.numero if fac else None,
+            cliente_nombre=cliente.razon_social if cliente else None,
+            comprobante_numero=comp_num, fecha_pago=fecha_pago,
+        ))
+    return VrtListResponse(items=items, total=total, pagina=pagina, por_pagina=por_pagina)
+
+
 def resumen(db: Session, fecha_corte_str: str | None = None) -> CxpResumenResponse:
     from collections import defaultdict
 
@@ -682,7 +917,7 @@ def resumen(db: Session, fecha_corte_str: str | None = None) -> CxpResumenRespon
         CxpDocumento.activo == True,
         CxpDocumento.estado == "contabilizado",
         CxpDocumento.saldo > 0,
-        CxpDocumento.tipo == "FACTURA",
+        CxpDocumento.tipo.in_(["FACTURA", "VRT"]),
     ).all()
 
     buckets: dict = defaultdict(lambda: {
@@ -933,14 +1168,23 @@ def contabilizar(db: Session, id: uuid.UUID, actor: UsuarioActual) -> CxpDocumen
         asiento.trm = doc.trm if doc.moneda_id != moneda_func.id else None
         db.query(CntAsientoLinea).filter(CntAsientoLinea.asiento_id == asiento.id).delete()
         db.flush()
-        for debito, credito, cta in [
-            (doc.total, Decimal("0"), cuenta_prov.id),
-            (Decimal("0"), doc.total, ban_cuenta.cuenta_contable_id),
-        ]:
+        # Débito por documento aplicado: FACTURA → proveedores; VRT → su cuenta 2815.
+        apps_asi = db.query(CxpAplicacion).filter(
+            CxpAplicacion.documento_credito_id == doc.id,
+            CxpAplicacion.estado.in_(["pendiente", "aplicado"]),
+        ).all()
+        debitos_por_cuenta: dict = {}
+        for ap in apps_asi:
+            ddoc = db.get(CxpDocumento, ap.documento_debito_id)
+            cta = _cuenta_pago_documento(db, ddoc, cuenta_prov)
+            debitos_por_cuenta[cta] = debitos_por_cuenta.get(cta, Decimal("0")) + ap.valor
+        movimientos = [(v, Decimal("0"), c) for c, v in debitos_por_cuenta.items()] or [(doc.total, Decimal("0"), cuenta_prov.id)]
+        movimientos.append((Decimal("0"), doc.total, ban_cuenta.cuenta_contable_id))
+        for orden_l, (debito, credito, cta) in enumerate(movimientos, start=1):
             d_f = (debito * trm).quantize(Decimal("0.0001")) if doc.moneda_id != moneda_func.id else debito
             c_f = (credito * trm).quantize(Decimal("0.0001")) if doc.moneda_id != moneda_func.id else credito
             db.add(CntAsientoLinea(
-                id=uuid.uuid4(), asiento_id=asiento.id, orden=1,
+                id=uuid.uuid4(), asiento_id=asiento.id, orden=orden_l,
                 cuenta_id=cta, debito=debito, credito=credito,
                 debito_funcional=d_f, credito_funcional=c_f,
                 tercero_id=doc.tercero_id,
@@ -1064,7 +1308,7 @@ def anular(db: Session, id: uuid.UUID, data: AnularCxpRequest, actor: UsuarioAct
                 contraasiento = CntAsiento(
                     id=uuid.uuid4(),
                     tipo_documento_id=asiento_orig.tipo_documento_id,
-                    documento_numero=asiento_orig.documento_numero,
+                    documento_numero=f"ANU-{asiento_orig.documento_numero}",
                     fecha=date.today(),
                     periodo_id=doc.periodo_id,
                     descripcion=f"ANULACIÓN {doc.tipo} {doc.numero} — {_get_tercero_nombre(db, doc.tercero_id)} · {data.motivo}",
@@ -1100,6 +1344,21 @@ def anular(db: Session, id: uuid.UUID, data: AnularCxpRequest, actor: UsuarioAct
             db.query(CntAsientoLinea).filter(CntAsientoLinea.asiento_id == asiento_borrador.id).delete()
             db.delete(asiento_borrador)
             doc.asiento_id = None
+
+    # COMPROBANTE: revertir aplicaciones y restaurar el saldo de lo que pagó
+    if doc.tipo == "COMPROBANTE":
+        apps_comp = db.query(CxpAplicacion).filter(
+            CxpAplicacion.documento_credito_id == doc.id,
+            CxpAplicacion.estado.in_(["pendiente", "aplicado"]),
+        ).all()
+        for ap in apps_comp:
+            if ap.estado == "aplicado":
+                pagado = db.query(CxpDocumento).filter(
+                    CxpDocumento.id == ap.documento_debito_id
+                ).with_for_update().first()
+                if pagado:
+                    pagado.saldo += ap.valor
+            db.delete(ap)
 
     doc.estado = "anulado"
     doc.saldo = Decimal("0")

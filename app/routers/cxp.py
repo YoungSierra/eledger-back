@@ -11,10 +11,53 @@ from app.schemas.cxp import (
     CxpDocumentoCreate, CxpDocumentoUpdate, AnularCxpRequest,
     CxpDocumentoResponse, CxpListResponse, CxpResumenResponse,
     ComprobanteCreate, FacturaPendienteCxpItem, AplicacionPendienteCxpItem,
+    VrtListResponse,
 )
+from app.schemas.facturacion import PreviewAsientoResponse
 from app.services import cxp_service
 
 router = APIRouter(prefix="/cxp", tags=["CxP — Cuentas por pagar"])
+
+
+@router.get("/valores-terceros", response_model=VrtListResponse)
+def listar_vrt(
+    tercero_id: uuid.UUID | None = Query(None),
+    estado: str | None = Query(None),
+    fecha_desde: str | None = Query(None),
+    fecha_hasta: str | None = Query(None),
+    pagina: int = Query(1, ge=1),
+    por_pagina: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxp_service.listar_vrt(db, tercero_id, estado, fecha_desde, fecha_hasta, pagina, por_pagina)
+
+
+@router.post("/comprobante/preview-asiento", response_model=PreviewAsientoResponse)
+def preview_asiento_comprobante(
+    body: ComprobanteCreate,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxp_service.preview_asiento_comprobante(db, body)
+
+
+@router.post("/preview-asiento", response_model=PreviewAsientoResponse)
+def preview_asiento_documento(
+    body: CxpDocumentoCreate,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxp_service.preview_asiento_documento(db, body)
+
+
+@router.get("/{id}/asiento", response_model=PreviewAsientoResponse)
+def asiento_contabilizado(
+    id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxp_service.asiento_contabilizado(db, id)
 
 
 @router.get("/facturas-pendientes", response_model=list[FacturaPendienteCxpItem])

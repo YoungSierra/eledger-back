@@ -10,6 +10,7 @@ from app.models.admin import AdmCondicionPago, AdmMoneda, AdmTarifaIva, AdmTipoD
 from app.models.adm import AdmTercero
 from app.models.contabilidad import CntAsiento, CntAsientoLinea, CntCentroCosto, CntCuenta, CntPeriodo
 from app.models.cxc import CxcDocumento, CxcParametroContable
+from app.models.cxp import CxpDocumento, CxpDocumentoLinea
 from app.models.facturacion import FacFactura, FacFacturaLinea, FacFacturaRetencion, FacResolucion
 from app.models.inventario import InvProducto, InvFamilia, InvTipoProducto, InvUnidadMedida
 from app.models.ope import OpeCotizacion, OpeCotizacionLinea, OpeConcepto
@@ -104,62 +105,117 @@ def _resolver_cuenta_iva(db: Session, linea: FacFacturaLinea, params: CxcParamet
     return None
 
 
+def _resolver_cuenta_vrt(db: Session, linea: FacFacturaLinea, params: CxcParametroContable | None) -> CntCuenta | None:
+    """Valor recibido para tercero: cuenta del concepto (cuenta_ingreso_id de la línea,
+    donde el usuario configura la 2815) → fallback al parámetro global de Parámetros CxC."""
+    if linea.cuenta_ingreso_id:
+        return db.get(CntCuenta, linea.cuenta_ingreso_id)
+    if params and params.cuenta_valores_terceros_id:
+        return db.get(CntCuenta, params.cuenta_valores_terceros_id)
+    return None
+
+
+def construir_asiento(
+    db: Session, fac: FacFactura,
+    cuenta_clientes: CntCuenta | None, params: CxcParametroContable | None,
+    preview: bool = False,
+) -> tuple[list[dict], list[str]]:
+    """Arma las líneas del asiento de la factura (sin persistir).
+    Retorna (lineas, avisos). En preview=True acumula avisos en vez de lanzar."""
+    avisos: list[str] = []
+    lineas: list[dict] = []
+
+    def problema(msg: str):
+        if preview:
+            avisos.append(msg)
+        else:
+            raise HTTPException(status_code=400, detail=msg)
+
+    def add(cuenta: CntCuenta | None, debito, credito, tercero_id=None, tercero_nombre=None, centro_costo_id=None):
+        cc_txt = None
+        if centro_costo_id:
+            cc = db.get(CntCentroCosto, centro_costo_id)
+            cc_txt = f"{cc.codigo} {cc.nombre}" if cc else None
+        lineas.append({
+            "cuenta_id": cuenta.id if cuenta else None,
+            "cuenta_codigo": cuenta.codigo if cuenta else None,
+            "cuenta_nombre": cuenta.nombre if cuenta else "(sin cuenta)",
+            "tercero_id": tercero_id or fac.cliente_id,
+            "tercero_nombre": tercero_nombre or _get_cliente_nombre(db, fac.cliente_id),
+            "centro_costo_id": centro_costo_id,
+            "centro_costo": cc_txt,
+            "debito": debito, "credito": credito,
+        })
+
+    if not cuenta_clientes:
+        problema("Configura la cuenta de clientes en Administración → Parámetros CxC.")
+
+    # D Clientes = total neto (subtotal + IVA - retenciones)
+    add(cuenta_clientes, fac.total, Decimal("0"))
+
+    # D Retenciones a favor (activo)
+    for ret in fac.retenciones:
+        cta_ret = db.get(CntCuenta, ret.cuenta_id) if ret.cuenta_id else None
+        if not cta_ret:
+            problema(f"La retención '{ret.concepto}' no tiene cuenta contable.")
+        add(cta_ret, ret.valor, Decimal("0"))
+
+    # C por línea: propio → ingreso (+IVA); tercero → cuenta 2815 con submayor proveedor
+    for linea in sorted(fac.lineas, key=lambda l: l.orden):
+        if linea.valor_tercero:
+            cta_vrt = _resolver_cuenta_vrt(db, linea, params)
+            if not cta_vrt:
+                problema(f"La línea '{linea.descripcion}' es valor para tercero pero no tiene cuenta: "
+                         "configúrala en el concepto o en Parámetros CxC (cuenta valores para terceros).")
+            prov_nombre = _get_cliente_nombre(db, linea.proveedor_id) if linea.proveedor_id else None
+            add(cta_vrt, Decimal("0"), linea.subtotal,
+                tercero_id=linea.proveedor_id, tercero_nombre=prov_nombre,
+                centro_costo_id=linea.centro_costo_id)
+            continue
+
+        cuenta_ingreso = _resolver_cuenta_ingreso(db, linea)
+        if not cuenta_ingreso:
+            if linea.cotizacion_linea_id:
+                problema(f"No se pudo resolver la cuenta de ingresos para el concepto '{linea.descripcion}'. "
+                         "Configura la cuenta de ingreso en el concepto (Operaciones → Conceptos).")
+            else:
+                problema(f"No se pudo resolver la cuenta de ingresos para la línea '{linea.descripcion}'. "
+                         "Configura la cuenta en el producto, familia o tipo de producto, "
+                         "o especifica la cuenta directamente en la línea.")
+        elif cuenta_ingreso.requiere_cc and not linea.centro_costo_id:
+            problema(f"La cuenta '{cuenta_ingreso.codigo}' requiere centro de costo. "
+                     f"Asígnalo en la línea '{linea.descripcion}'.")
+        add(cuenta_ingreso, Decimal("0"), linea.subtotal, centro_costo_id=linea.centro_costo_id)
+
+        if linea.total_iva > 0:
+            cuenta_iva = _resolver_cuenta_iva(db, linea, params)
+            if not cuenta_iva:
+                problema(f"La línea '{linea.descripcion}' tiene IVA pero no tiene cuenta IVA configurada. "
+                         "Asígnala en la línea o en Parámetros CxC.")
+            add(cuenta_iva, Decimal("0"), linea.total_iva)
+
+    return lineas, avisos
+
+
 def _poblar_lineas_asiento(
     db: Session, asiento_id: uuid.UUID, fac: FacFactura,
     cuenta_clientes: CntCuenta, params: CxcParametroContable | None,
     moneda_func: AdmMoneda,
 ) -> None:
     trm = fac.trm or Decimal("1")
-    orden = 1
-
-    def add(cuenta_id, debito, credito, tercero_id=None, centro_costo_id=None):
-        nonlocal orden
+    lineas, _ = construir_asiento(db, fac, cuenta_clientes, params, preview=False)
+    for orden, l in enumerate(lineas, start=1):
+        debito, credito = l["debito"], l["credito"]
         d_f = (debito * trm).quantize(Decimal("0.0001")) if fac.moneda_id != moneda_func.id else debito
         c_f = (credito * trm).quantize(Decimal("0.0001")) if fac.moneda_id != moneda_func.id else credito
         db.add(CntAsientoLinea(
             id=uuid.uuid4(), asiento_id=asiento_id, orden=orden,
-            cuenta_id=cuenta_id,
+            cuenta_id=l["cuenta_id"],
             debito=debito, credito=credito,
             debito_funcional=d_f, credito_funcional=c_f,
-            tercero_id=tercero_id or fac.cliente_id,
-            centro_costo_id=centro_costo_id,
+            tercero_id=l["tercero_id"],
+            centro_costo_id=l["centro_costo_id"],
         ))
-        orden += 1
-
-    # D Clientes = total neto (subtotal + IVA - retenciones)
-    add(cuenta_clientes.id, fac.total, Decimal("0"))
-
-    # D Retenciones a favor (activo) por cada retención
-    for ret in fac.retenciones:
-        add(ret.cuenta_id, ret.valor, Decimal("0"))
-
-    # C Ingresos + C IVA por línea
-    for linea in sorted(fac.lineas, key=lambda l: l.orden):
-        cuenta_ingreso = _resolver_cuenta_ingreso(db, linea)
-        if not cuenta_ingreso:
-            raise HTTPException(
-                status_code=400,
-                detail=f"No se pudo resolver la cuenta de ingresos para la línea '{linea.descripcion}'. "
-                       "Configura la cuenta en el producto, familia o tipo de producto, "
-                       "o especifica la cuenta directamente en la línea."
-            )
-        if cuenta_ingreso.requiere_cc and not linea.centro_costo_id:
-            raise HTTPException(
-                status_code=400,
-                detail=f"La cuenta '{cuenta_ingreso.codigo}' requiere centro de costo. "
-                       f"Asígnalo en la línea '{linea.descripcion}'."
-            )
-        add(cuenta_ingreso.id, Decimal("0"), linea.subtotal, centro_costo_id=linea.centro_costo_id)
-
-        if linea.total_iva > 0:
-            cuenta_iva = _resolver_cuenta_iva(db, linea, params)
-            if not cuenta_iva:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"La línea '{linea.descripcion}' tiene IVA pero no tiene cuenta IVA configurada. "
-                           "Asígnala en la línea o en Parámetros CxC."
-                )
-            add(cuenta_iva.id, Decimal("0"), linea.total_iva)
 
 
 def _to_linea_response(db: Session, linea: FacFacturaLinea) -> LineaFacResponse:
@@ -212,6 +268,9 @@ def _to_linea_response(db: Session, linea: FacFacturaLinea) -> LineaFacResponse:
         centro_costo_nombre=cc_nombre,
         cotizacion_linea_id=linea.cotizacion_linea_id,
         monto_cotizacion=linea.monto_cotizacion,
+        valor_tercero=linea.valor_tercero,
+        proveedor_id=linea.proveedor_id,
+        proveedor_nombre=linea.proveedor_nombre,
     )
 
 
@@ -275,8 +334,16 @@ def _to_response(fac: FacFactura, db: Session) -> FacFacturaResponse:
 def _to_list_item(fac: FacFactura, db: Session, hoy: date) -> FacFacturaListItem:
     cliente = db.get(AdmTercero, fac.cliente_id)
     moneda = db.get(AdmMoneda, fac.moneda_id)
+    # Saldo del CxC asociado: si ya está pagada (saldo 0) no se muestra vencimiento.
+    saldo = None
+    pagada = False
+    if fac.cxc_documento_id:
+        cxc = db.get(CxcDocumento, fac.cxc_documento_id)
+        if cxc:
+            saldo = cxc.saldo
+            pagada = cxc.saldo <= 0
     dias = None
-    if fac.fecha_vencimiento and fac.estado == "contabilizada":
+    if fac.fecha_vencimiento and fac.estado == "contabilizada" and not pagada:
         dias = (fac.fecha_vencimiento - hoy).days
     return FacFacturaListItem(
         id=fac.id, numero=fac.numero,
@@ -289,6 +356,9 @@ def _to_list_item(fac: FacFactura, db: Session, hoy: date) -> FacFacturaListItem
         estado=fac.estado,
         dian_estado=fac.dian_estado,
         dias_vencimiento=dias,
+        saldo=saldo,
+        pagada=pagada,
+        creado_en=fac.creado_en,
     )
 
 
@@ -312,6 +382,17 @@ def _normalizar_iva_tipo(tipo: str, pct: Decimal) -> str:
 
 def _persistir_lineas(db: Session, fac_id: uuid.UUID, lineas_data) -> None:
     for i, ld in enumerate(lineas_data, start=1):
+        es_tercero = getattr(ld, "valor_tercero", False)
+        proveedor_id = getattr(ld, "proveedor_id", None)
+        if es_tercero and not proveedor_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"La línea '{ld.descripcion}' es valor para tercero: debe indicar el proveedor al que se traslada.",
+            )
+        # Un valor para tercero no genera IVA propio: se fuerza a cero.
+        iva_tipo = "NINGUNO" if es_tercero else _normalizar_iva_tipo(ld.iva_tipo, ld.iva_pct)
+        iva_pct = Decimal("0") if es_tercero else ld.iva_pct
+        total_iva = Decimal("0") if es_tercero else ld.total_iva
         db.add(FacFacturaLinea(
             id=uuid.uuid4(), factura_id=fac_id, orden=i,
             producto_id=ld.producto_id,
@@ -320,14 +401,16 @@ def _persistir_lineas(db: Session, fac_id: uuid.UUID, lineas_data) -> None:
             precio_unitario=ld.precio_unitario,
             descuento_pct=ld.descuento_pct, descuento_valor=ld.descuento_valor,
             subtotal=ld.subtotal,
-            iva_tipo=_normalizar_iva_tipo(ld.iva_tipo, ld.iva_pct),
-            iva_pct=ld.iva_pct, total_iva=ld.total_iva,
-            cuenta_iva_id=ld.cuenta_iva_id,
+            iva_tipo=iva_tipo,
+            iva_pct=iva_pct, total_iva=total_iva,
+            cuenta_iva_id=None if es_tercero else ld.cuenta_iva_id,
             total=ld.total,
             cuenta_ingreso_id=ld.cuenta_ingreso_id,
             centro_costo_id=ld.centro_costo_id,
             cotizacion_linea_id=getattr(ld, "cotizacion_linea_id", None),
             monto_cotizacion=getattr(ld, "monto_cotizacion", None),
+            valor_tercero=es_tercero,
+            proveedor_id=proveedor_id,
         ))
 
 
@@ -363,7 +446,7 @@ def listar(
     if fecha_hasta:  q = q.filter(FacFactura.fecha <= fecha_hasta)
     total = q.count()
     hoy = date.today()
-    rows = q.order_by(FacFactura.fecha.desc()).offset((pagina - 1) * por_pagina).limit(por_pagina).all()
+    rows = q.order_by(FacFactura.fecha.desc(), FacFactura.creado_en.desc()).offset((pagina - 1) * por_pagina).limit(por_pagina).all()
     return FacListResponse(
         items=[_to_list_item(r, db, hoy) for r in rows],
         total=total, pagina=pagina, por_pagina=por_pagina,
@@ -390,11 +473,11 @@ def _facturado_por_linea(db: Session, cotizacion_id: uuid.UUID, excluir_factura_
     return {lid: Decimal(str(m or 0)) for lid, m in q.group_by(FacFacturaLinea.cotizacion_linea_id).all()}
 
 
-def estado_facturacion_cotizacion(db: Session, cotizacion_id: uuid.UUID) -> dict:
+def estado_facturacion_cotizacion(db: Session, cotizacion_id: uuid.UUID, excluir_factura_id: uuid.UUID | None = None) -> dict:
     cot = db.get(OpeCotizacion, cotizacion_id)
     if not cot:
         raise HTTPException(status_code=404, detail="Cotización no encontrada")
-    facturado = _facturado_por_linea(db, cotizacion_id)
+    facturado = _facturado_por_linea(db, cotizacion_id, excluir_factura_id)
     lineas, algo_fact, algo_pend = [], False, False
     TOL = Decimal("0.0001")
     for l in sorted(cot.lineas, key=lambda x: (x.seccion, x.orden)):
@@ -404,13 +487,32 @@ def estado_facturacion_cotizacion(db: Session, cotizacion_id: uuid.UUID) -> dict
             algo_fact = True
         if pend > TOL:
             algo_pend = True
+        # Parámetros de facturación del concepto (cuenta de ingreso + IVA).
+        concepto = db.get(OpeConcepto, l.concepto_id) if l.concepto_id else None
+        cta = db.get(CntCuenta, concepto.cuenta_ingreso_id) if concepto and concepto.cuenta_ingreso_id else None
+        tarifa = db.get(AdmTarifaIva, concepto.tarifa_iva_id) if concepto and concepto.tarifa_iva_id else None
+        cta_iva = db.get(CntCuenta, tarifa.cuenta_iva_ventas_id) if tarifa and tarifa.cuenta_iva_ventas_id else None
+        um = db.get(InvUnidadMedida, concepto.um_id) if concepto and concepto.um_id else None
+        prov = db.get(AdmTercero, l.proveedor_id) if l.proveedor_id else None
         lineas.append({
             "linea_id": str(l.id), "seccion": l.seccion, "descripcion": l.descripcion,
             "moneda": l.moneda, "total_venta": str(l.total_venta),
             "facturado": str(fact), "pendiente": str(pend if pend > 0 else Decimal("0")),
+            "cuenta_ingreso_id": str(cta.id) if cta else None,
+            "cuenta_ingreso_display": f"{cta.codigo} {cta.nombre}" if cta else None,
+            "tarifa_iva_id": str(tarifa.id) if tarifa else None,
+            "iva_pct": str(tarifa.porcentaje) if tarifa else "0",
+            "cuenta_iva_id": str(cta_iva.id) if cta_iva else None,
+            "cuenta_iva_display": f"{cta_iva.codigo} {cta_iva.nombre}" if cta_iva else None,
+            "um_id": str(um.id) if um else None,
+            "um_codigo": um.codigo if um else None,
+            "valor_tercero": l.valor_tercero,
+            "proveedor_id": str(l.proveedor_id) if l.proveedor_id else None,
+            "proveedor_display": f"{prov.nit} — {prov.razon_social}" if prov else None,
         })
     estado = "facturada" if (algo_fact and not algo_pend) else ("parcial" if algo_fact else "pendiente")
-    return {"cotizacion_id": str(cot.id), "numero": cot.numero, "estado_facturacion": estado, "lineas": lineas}
+    return {"cotizacion_id": str(cot.id), "numero": cot.numero, "trm": str(cot.trm or 0),
+            "estado_facturacion": estado, "lineas": lineas}
 
 
 def _validar_lineas_cotizacion(db: Session, data: FacFacturaCreate) -> None:
@@ -516,6 +618,7 @@ def facturar_cotizacion(db: Session, cotizacion_id: uuid.UUID, req: FacturarCoti
         lineas.append(LineaFacCreate(
             descripcion=cl.descripcion,
             cantidad=Decimal("1"),
+            um_id=concepto.um_id,
             precio_unitario=subtotal,
             subtotal=subtotal,
             iva_tipo="GRAVADO" if pct > 0 else "NINGUNO",
@@ -595,6 +698,141 @@ def actualizar(db: Session, id: uuid.UUID, data: FacFacturaUpdate, actor: Usuari
     db.commit()
     db.refresh(fac)
     return _to_response(fac, db)
+
+
+def _generar_vrt_documentos(db: Session, fac: FacFactura, params: CxcParametroContable | None, actor: UsuarioActual) -> None:
+    """Crea un documento CxP tipo VRT por cada proveedor con líneas de valor tercero.
+    NO genera asiento propio: el crédito a 2815 ya lo hizo la factura de venta."""
+    from app.services import cxp_service
+    tercero_lineas = [l for l in fac.lineas if l.valor_tercero and l.proveedor_id]
+    if not tercero_lineas:
+        return
+    grupos: dict = {}
+    for l in tercero_lineas:
+        grupos.setdefault(l.proveedor_id, []).append(l)
+
+    for prov_id, lns in grupos.items():
+        total = sum((l.subtotal for l in lns), Decimal("0"))
+        doc = CxpDocumento(
+            id=uuid.uuid4(),
+            numero=cxp_service._generar_numero(db, "VRT"),
+            tipo="VRT",
+            fecha=fac.fecha,
+            fecha_vencimiento=fac.fecha_vencimiento,
+            periodo_id=fac.periodo_id,
+            tercero_id=prov_id,
+            moneda_id=fac.moneda_id,
+            trm=fac.trm,
+            subtotal=total, total_iva=Decimal("0"),
+            total_retenciones=Decimal("0"), total=total, saldo=total,
+            descripcion=f"Valores recibidos para tercero — factura {fac.numero}",
+            estado="contabilizado",
+            asiento_id=None,
+            origen_modulo="fac_factura",
+            origen_id=fac.id,
+            creado_por=uuid.UUID(actor.id),
+        )
+        db.add(doc)
+        db.flush()
+        for orden, l in enumerate(lns, start=1):
+            cta = _resolver_cuenta_vrt(db, l, params)
+            db.add(CxpDocumentoLinea(
+                id=uuid.uuid4(), documento_id=doc.id, orden=orden,
+                descripcion=l.descripcion, concepto_id=None,
+                cuenta_id=cta.id if cta else None,
+                subtotal=l.subtotal, iva_pct=Decimal("0"), total_iva=Decimal("0"),
+                total=l.subtotal, iva_tipo="NINGUNO",
+            ))
+
+
+def preview_asiento(db: Session, data: FacFacturaCreate) -> "PreviewAsientoResponse":
+    from app.schemas.facturacion import PreviewAsientoResponse, PreviewAsientoLinea
+    moneda_func = _moneda_funcional(db)
+    params = db.query(CxcParametroContable).first()
+    cuenta_clientes = db.get(CntCuenta, params.cuenta_clientes_id) if params and params.cuenta_clientes_id else None
+
+    subtotal, total_iva, total_ret, _td, total = _calcular_totales(data.lineas, data.retenciones)
+
+    # Factura transitoria (no se persiste) — replica la normalización de _persistir_lineas.
+    fac = FacFactura(
+        id=uuid.uuid4(), cliente_id=data.cliente_id,
+        moneda_id=data.moneda_id, trm=data.trm,
+        subtotal=subtotal, total_iva=total_iva, total_retenciones=total_ret, total=total,
+    )
+    fac.lineas = []
+    for i, ld in enumerate(data.lineas, start=1):
+        es_ter = getattr(ld, "valor_tercero", False)
+        fac.lineas.append(FacFacturaLinea(
+            id=uuid.uuid4(), orden=i, producto_id=ld.producto_id,
+            descripcion=ld.descripcion, cantidad=ld.cantidad,
+            precio_unitario=ld.precio_unitario, subtotal=ld.subtotal,
+            iva_tipo="NINGUNO" if es_ter else _normalizar_iva_tipo(ld.iva_tipo, ld.iva_pct),
+            iva_pct=Decimal("0") if es_ter else ld.iva_pct,
+            total_iva=Decimal("0") if es_ter else ld.total_iva,
+            cuenta_iva_id=None if es_ter else ld.cuenta_iva_id,
+            total=ld.total, cuenta_ingreso_id=ld.cuenta_ingreso_id,
+            centro_costo_id=ld.centro_costo_id,
+            cotizacion_linea_id=getattr(ld, "cotizacion_linea_id", None),
+            valor_tercero=es_ter, proveedor_id=getattr(ld, "proveedor_id", None),
+        ))
+    fac.retenciones = [
+        FacFacturaRetencion(id=uuid.uuid4(), tipo=r.tipo, concepto=r.concepto,
+                            base=r.base, porcentaje=r.porcentaje, valor=r.valor, cuenta_id=r.cuenta_id)
+        for r in data.retenciones
+    ]
+
+    lineas, avisos = construir_asiento(db, fac, cuenta_clientes, params, preview=True)
+    total_d = sum((l["debito"] for l in lineas), Decimal("0"))
+    total_c = sum((l["credito"] for l in lineas), Decimal("0"))
+    moneda = db.get(AdmMoneda, data.moneda_id)
+    return PreviewAsientoResponse(
+        lineas=[PreviewAsientoLinea(
+            cuenta_codigo=l["cuenta_codigo"], cuenta_nombre=l["cuenta_nombre"],
+            tercero_nombre=l["tercero_nombre"], centro_costo=l["centro_costo"],
+            debito=l["debito"], credito=l["credito"],
+        ) for l in lineas],
+        total_debito=total_d, total_credito=total_c,
+        cuadra=abs(total_d - total_c) <= Decimal("0.01"),
+        moneda_codigo=moneda.codigo if moneda else None,
+        avisos=avisos,
+    )
+
+
+def asiento_contabilizado(db: Session, id: uuid.UUID) -> "PreviewAsientoResponse":
+    """Líneas del asiento REAL ya contabilizado de la factura de venta."""
+    from app.schemas.facturacion import PreviewAsientoResponse, PreviewAsientoLinea
+    fac = db.query(FacFactura).filter(FacFactura.id == id).first()
+    if not fac or not fac.asiento_id:
+        return PreviewAsientoResponse(
+            lineas=[], total_debito=Decimal("0"), total_credito=Decimal("0"),
+            cuadra=True, moneda_codigo=None,
+            avisos=["La factura aún no tiene asiento contabilizado."],
+        )
+    asiento = db.get(CntAsiento, fac.asiento_id)
+    lineas = db.query(CntAsientoLinea).filter(
+        CntAsientoLinea.asiento_id == fac.asiento_id
+    ).order_by(CntAsientoLinea.orden).all()
+    out = []
+    for l in lineas:
+        c = db.get(CntCuenta, l.cuenta_id) if l.cuenta_id else None
+        terc = db.get(AdmTercero, l.tercero_id) if l.tercero_id else None
+        cc = db.get(CntCentroCosto, l.centro_costo_id) if l.centro_costo_id else None
+        out.append(PreviewAsientoLinea(
+            cuenta_codigo=c.codigo if c else None,
+            cuenta_nombre=c.nombre if c else None,
+            tercero_nombre=terc.razon_social if terc else None,
+            centro_costo=f"{cc.codigo} {cc.nombre}" if cc else None,
+            debito=l.debito, credito=l.credito,
+        ))
+    total_d = sum((l.debito for l in lineas), Decimal("0"))
+    total_c = sum((l.credito for l in lineas), Decimal("0"))
+    moneda = db.get(AdmMoneda, fac.moneda_id)
+    return PreviewAsientoResponse(
+        lineas=out, total_debito=total_d, total_credito=total_c,
+        cuadra=abs(total_d - total_c) <= Decimal("0.01"),
+        moneda_codigo=moneda.codigo if moneda else None, avisos=[],
+        asiento_numero=asiento.numero if asiento else None,
+    )
 
 
 def contabilizar(db: Session, id: uuid.UUID, actor: UsuarioActual) -> FacFacturaResponse:
@@ -683,6 +921,9 @@ def contabilizar(db: Session, id: uuid.UUID, actor: UsuarioActual) -> FacFactura
     db.add(cxc_doc)
     db.flush()
 
+    # Generar documento(s) VRT en CxP por las líneas de valor tercero (sin asiento propio).
+    _generar_vrt_documentos(db, fac, params, actor)
+
     fac.asiento_id = asiento.id
     fac.cxc_documento_id = cxc_doc.id
     fac.estado = "contabilizada"
@@ -728,6 +969,24 @@ def anular(db: Session, id: uuid.UUID, data: AnularFacturaRequest, actor: Usuari
     if not periodo or periodo.estado != "abierto":
         raise HTTPException(status_code=400, detail="El período contable no está abierto. No se puede anular.")
 
+    # VRT (valores recibidos para terceros) generados por esta factura: bloquear si alguno ya tiene pago
+    from app.models.cxp import CxpAplicacion
+    vrts = db.query(CxpDocumento).filter(
+        CxpDocumento.origen_modulo == "fac_factura",
+        CxpDocumento.origen_id == fac.id,
+        CxpDocumento.tipo == "VRT",
+        CxpDocumento.estado != "anulado",
+    ).all()
+    for v in vrts:
+        pagado = (v.saldo is not None and v.total is not None and v.saldo < v.total)
+        ap = db.query(CxpAplicacion).filter(CxpAplicacion.documento_debito_id == v.id).first()
+        if pagado or ap:
+            raise HTTPException(
+                status_code=409,
+                detail=f"No se puede anular: el valor para tercero {v.numero} ya tiene un pago. "
+                       "Reversa/anula el comprobante de pago antes de anular la factura.",
+            )
+
     moneda_func = _moneda_funcional(db)
     asiento_orig = db.get(CntAsiento, fac.asiento_id) if fac.asiento_id else None
 
@@ -767,6 +1026,14 @@ def anular(db: Session, id: uuid.UUID, data: AnularFacturaRequest, actor: Usuari
         if cxc_doc:
             cxc_doc.estado = "anulado"
             cxc_doc.saldo = Decimal("0")
+
+    # Anular los VRT generados (sin contraasiento propio: el crédito a 2815 ya lo
+    # reversa el contraasiento de la factura, que revierte todas sus líneas).
+    for v in vrts:
+        v.estado = "anulado"
+        v.saldo = Decimal("0")
+        v.modificado_por = uuid.UUID(actor.id)
+        v.modificado_en = datetime.now(timezone.utc)
 
     fac.estado = "anulada"
     fac.activo = False

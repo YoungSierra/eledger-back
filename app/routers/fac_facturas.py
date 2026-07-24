@@ -8,10 +8,29 @@ from app.schemas.auth import UsuarioActual
 from app.schemas.facturacion import (
     FacFacturaCreate, FacFacturaUpdate, AnularFacturaRequest,
     FacFacturaResponse, FacListResponse, FacturarCotizacionRequest,
+    PreviewAsientoResponse,
 )
 from app.services import facturacion_service
 
 router = APIRouter(prefix="/facturacion/facturas", tags=["Facturas de venta"])
+
+
+@router.post("/preview-asiento", response_model=PreviewAsientoResponse)
+def preview_asiento(
+    body: FacFacturaCreate,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return facturacion_service.preview_asiento(db, body)
+
+
+@router.get("/{id}/asiento", response_model=PreviewAsientoResponse)
+def asiento_contabilizado(
+    id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return facturacion_service.asiento_contabilizado(db, id)
 
 
 @router.get("", response_model=FacListResponse)

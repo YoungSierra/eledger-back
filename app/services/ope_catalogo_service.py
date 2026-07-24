@@ -101,6 +101,7 @@ def actualizar_aeropuerto(db: Session, aeropuerto_id: uuid.UUID, data: OpeAeropu
 def _attach_concepto(c: OpeConcepto) -> OpeConcepto:
     c.cuenta_ingreso_nombre = f"{c.cuenta_ingreso.codigo} — {c.cuenta_ingreso.nombre}" if c.cuenta_ingreso else None
     c.tarifa_iva_nombre = c.tarifa_iva.nombre if c.tarifa_iva else None
+    c.um_codigo = c.um.codigo if c.um else None
     return c
 
 

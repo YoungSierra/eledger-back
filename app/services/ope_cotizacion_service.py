@@ -307,6 +307,7 @@ def _agregar_linea(db: Session, cotizacion: OpeCotizacion, data: OpeCotizacionLi
         total_costo=tc,
         moneda=data.moneda,
         proveedor_id=data.proveedor_id,
+        valor_tercero=data.valor_tercero,
         condiciones_costo=data.condiciones_costo,
         notas=data.notas,
     )

@@ -198,13 +198,17 @@ def _to_recepcion_response(rec: ComRecepcion) -> RecepcionResponse:
 def listar_ocs(
     db: Session, pagina: int = 1, por_pagina: int = 20,
     estado: list[str] | None = None, proveedor_id: uuid.UUID | None = None,
-    busqueda: str | None = None,
+    busqueda: str | None = None, fecha_desde: str | None = None, fecha_hasta: str | None = None,
 ) -> OcListResponse:
     q = db.query(ComOrdenCompra).filter(ComOrdenCompra.activo == True)
     if estado:
         q = q.filter(ComOrdenCompra.estado.in_(estado))
     if proveedor_id:
         q = q.filter(ComOrdenCompra.proveedor_id == proveedor_id)
+    if fecha_desde:
+        q = q.filter(ComOrdenCompra.fecha >= fecha_desde)
+    if fecha_hasta:
+        q = q.filter(ComOrdenCompra.fecha <= fecha_hasta)
     if busqueda:
         term = f"%{busqueda}%"
         q = q.join(ComOrdenCompra.proveedor).filter(
@@ -444,12 +448,19 @@ def anular_oc(db: Session, oc_id: uuid.UUID, actor: UsuarioActual) -> OcResponse
 def listar_recepciones(
     db: Session, pagina: int = 1, por_pagina: int = 20,
     estado: str | None = None, oc_id: uuid.UUID | None = None,
+    proveedor_id: uuid.UUID | None = None, fecha_desde: str | None = None, fecha_hasta: str | None = None,
 ) -> RecepcionListResponse:
     q = db.query(ComRecepcion).filter(ComRecepcion.activo == True)
     if estado:
         q = q.filter(ComRecepcion.estado == estado)
     if oc_id:
         q = q.filter(ComRecepcion.oc_id == oc_id)
+    if proveedor_id:
+        q = q.filter(ComRecepcion.proveedor_id == proveedor_id)
+    if fecha_desde:
+        q = q.filter(ComRecepcion.fecha >= fecha_desde)
+    if fecha_hasta:
+        q = q.filter(ComRecepcion.fecha <= fecha_hasta)
     total = q.count()
     recs = q.order_by(ComRecepcion.fecha.desc()).offset((pagina - 1) * por_pagina).limit(por_pagina).all()
 
@@ -551,6 +562,38 @@ def crear_recepcion(db: Session, data: RecepcionCreate, actor: UsuarioActual) ->
     db.commit()
     db.refresh(rec)
     return _to_recepcion_response(rec)
+
+
+def asiento_recepcion(db: Session, rec_id: uuid.UUID) -> "PreviewAsientoResponse":
+    """Líneas del asiento REAL de una recepción confirmada."""
+    from app.schemas.facturacion import PreviewAsientoResponse, PreviewAsientoLinea
+    from decimal import Decimal
+    rec = db.query(ComRecepcion).filter(ComRecepcion.id == rec_id).first()
+    if not rec or not rec.asiento_id:
+        return PreviewAsientoResponse(
+            lineas=[], total_debito=Decimal("0"), total_credito=Decimal("0"),
+            cuadra=True, moneda_codigo=None, avisos=["La recepción aún no tiene asiento contabilizado."],
+        )
+    asiento = db.get(CntAsiento, rec.asiento_id)
+    lineas = db.query(CntAsientoLinea).filter(
+        CntAsientoLinea.asiento_id == rec.asiento_id
+    ).order_by(CntAsientoLinea.orden).all()
+    out = []
+    for l in lineas:
+        c = db.get(CntCuenta, l.cuenta_id) if l.cuenta_id else None
+        terc = db.get(AdmTercero, l.tercero_id) if l.tercero_id else None
+        out.append(PreviewAsientoLinea(
+            cuenta_codigo=c.codigo if c else None, cuenta_nombre=c.nombre if c else None,
+            tercero_nombre=terc.razon_social if terc else None, centro_costo=None,
+            debito=l.debito, credito=l.credito,
+        ))
+    total_d = sum((l.debito for l in lineas), Decimal("0"))
+    total_c = sum((l.credito for l in lineas), Decimal("0"))
+    return PreviewAsientoResponse(
+        lineas=out, total_debito=total_d, total_credito=total_c,
+        cuadra=abs(total_d - total_c) <= Decimal("0.01"),
+        moneda_codigo=None, avisos=[], asiento_numero=asiento.numero if asiento else None,
+    )
 
 
 def obtener_recepcion(db: Session, rec_id: uuid.UUID) -> RecepcionResponse:

@@ -216,6 +216,112 @@ def _poblar_lineas_asiento_cxc(
         add_linea(cuenta_ingresos.id, Decimal("0"), doc.total)
 
 
+def _construir_preview_cxc(db: Session, doc: CxcDocumento) -> "PreviewAsientoResponse":
+    """Arma las líneas del asiento de un documento CxC (transitorio) para preview."""
+    from app.schemas.facturacion import PreviewAsientoResponse, PreviewAsientoLinea
+    avisos: list[str] = []
+    res = _resolver_parametros_cxc(db, doc.tipo)
+    if not res:
+        avisos.append("Faltan parámetros contables de CxC (Administración → Parámetros CxC).")
+        cuenta_cxc = cuenta_ingresos = cuenta_iva_p = None
+    else:
+        cuenta_cxc, cuenta_ingresos, cuenta_iva_p = res
+    terc = _get_tercero_nombre(db, doc.tercero_id)
+    lineas: list[PreviewAsientoLinea] = []
+
+    def add(cuenta: CntCuenta | None, deb, cred):
+        lineas.append(PreviewAsientoLinea(
+            cuenta_codigo=cuenta.codigo if cuenta else None,
+            cuenta_nombre=cuenta.nombre if cuenta else "(sin cuenta)",
+            tercero_nombre=terc, centro_costo=None, debito=deb, credito=cred,
+        ))
+
+    if doc.tipo == "FACTURA":
+        add(cuenta_cxc, doc.total, Decimal("0"))
+        add(cuenta_ingresos, Decimal("0"), doc.subtotal)
+        if doc.total_iva > 0 and cuenta_iva_p:
+            add(cuenta_iva_p, Decimal("0"), doc.total_iva)
+        for r in doc.retenciones:
+            add(db.get(CntCuenta, r.cuenta_id) if r.cuenta_id else None, Decimal("0"), r.valor)
+    elif doc.tipo == "RECIBO":
+        add(cuenta_cxc, Decimal("0"), doc.total)
+        ban = db.get(BanCuenta, doc.ban_cuenta_id) if doc.ban_cuenta_id else None
+        add(db.get(CntCuenta, ban.cuenta_contable_id) if ban and ban.cuenta_contable_id else None, doc.subtotal, Decimal("0"))
+        for r in doc.retenciones:
+            add(db.get(CntCuenta, r.cuenta_id) if r.cuenta_id else None, r.valor, Decimal("0"))
+    elif doc.tipo == "NOTA_CREDITO":
+        add(cuenta_cxc, Decimal("0"), doc.total)
+        add(cuenta_ingresos, doc.total, Decimal("0"))
+    elif doc.tipo == "NOTA_DEBITO":
+        add(cuenta_cxc, doc.total, Decimal("0"))
+        add(cuenta_ingresos, Decimal("0"), doc.total)
+
+    total_d = sum((l.debito for l in lineas), Decimal("0"))
+    total_c = sum((l.credito for l in lineas), Decimal("0"))
+    moneda = db.get(AdmMoneda, doc.moneda_id)
+    return PreviewAsientoResponse(
+        lineas=lineas, total_debito=total_d, total_credito=total_c,
+        cuadra=abs(total_d - total_c) <= Decimal("0.01"),
+        moneda_codigo=moneda.codigo if moneda else None, avisos=avisos,
+    )
+
+
+def preview_asiento_documento(db: Session, data) -> "PreviewAsientoResponse":
+    total = _calcular_totales(data.subtotal, data.total_iva, data.total_retenciones)
+    doc = CxcDocumento(
+        tipo=data.tipo, tercero_id=data.tercero_id, moneda_id=data.moneda_id,
+        trm=data.trm, subtotal=data.subtotal, total_iva=data.total_iva,
+        total_retenciones=data.total_retenciones, total=total,
+    )
+    doc.retenciones = list(data.retenciones)
+    return _construir_preview_cxc(db, doc)
+
+
+def preview_asiento_recibo(db: Session, data) -> "PreviewAsientoResponse":
+    ret_total = sum((r.valor for r in data.retenciones), Decimal("0"))
+    total = data.valor_recibido + ret_total
+    doc = CxcDocumento(
+        tipo="RECIBO", tercero_id=data.tercero_id, moneda_id=data.moneda_id,
+        trm=data.trm, subtotal=data.valor_recibido, total_iva=Decimal("0"),
+        total_retenciones=ret_total, total=total, ban_cuenta_id=data.ban_cuenta_id,
+    )
+    doc.retenciones = list(data.retenciones)
+    return _construir_preview_cxc(db, doc)
+
+
+def asiento_contabilizado(db: Session, id: uuid.UUID) -> "PreviewAsientoResponse":
+    """Líneas del asiento REAL ya contabilizado de un documento/recibo CxC."""
+    from app.schemas.facturacion import PreviewAsientoResponse, PreviewAsientoLinea
+    doc = db.query(CxcDocumento).filter(CxcDocumento.id == id).first()
+    if not doc or not doc.asiento_id:
+        return PreviewAsientoResponse(
+            lineas=[], total_debito=Decimal("0"), total_credito=Decimal("0"),
+            cuadra=True, moneda_codigo=None, avisos=["El documento aún no tiene asiento contabilizado."],
+        )
+    asiento = db.get(CntAsiento, doc.asiento_id)
+    lineas = db.query(CntAsientoLinea).filter(
+        CntAsientoLinea.asiento_id == doc.asiento_id
+    ).order_by(CntAsientoLinea.orden).all()
+    out = []
+    for l in lineas:
+        c = db.get(CntCuenta, l.cuenta_id) if l.cuenta_id else None
+        terc = db.get(AdmTercero, l.tercero_id) if l.tercero_id else None
+        out.append(PreviewAsientoLinea(
+            cuenta_codigo=c.codigo if c else None, cuenta_nombre=c.nombre if c else None,
+            tercero_nombre=terc.razon_social if terc else None, centro_costo=None,
+            debito=l.debito, credito=l.credito,
+        ))
+    total_d = sum((l.debito for l in lineas), Decimal("0"))
+    total_c = sum((l.credito for l in lineas), Decimal("0"))
+    moneda = db.get(AdmMoneda, doc.moneda_id)
+    return PreviewAsientoResponse(
+        lineas=out, total_debito=total_d, total_credito=total_c,
+        cuadra=abs(total_d - total_c) <= Decimal("0.01"),
+        moneda_codigo=moneda.codigo if moneda else None, avisos=[],
+        asiento_numero=asiento.numero if asiento else None,
+    )
+
+
 def _resolver_parametros_cxc(db: Session, tipo: str):
     """Devuelve (cuenta_cxc, cuenta_ingresos, cuenta_iva_p) o None si faltan las requeridas."""
     params = db.query(CxcParametroContable).first()

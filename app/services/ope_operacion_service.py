@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.ope import (
@@ -98,14 +99,25 @@ def listar_operaciones(
     fecha_hasta: date | None = None,
 ) -> list[OpeOperacion]:
     q = db.query(OpeOperacion).filter(OpeOperacion.activo == True)
+    # Se une a las cotizaciones cuando hace falta (asesor propio o búsqueda por cliente).
+    needs_join = actor.ver_solo_propios or bool(busqueda)
+    if needs_join:
+        q = q.join(OpeCotizacion, OpeCotizacion.operacion_id == OpeOperacion.id)
     if actor.ver_solo_propios:
-        q = q.join(OpeCotizacion, OpeCotizacion.operacion_id == OpeOperacion.id)\
-             .filter(OpeCotizacion.asesor_id == uuid.UUID(actor.id))\
-             .distinct()
+        q = q.filter(OpeCotizacion.asesor_id == uuid.UUID(actor.id))
+    if busqueda:
+        like = f"%{busqueda}%"
+        q = q.outerjoin(AdmTercero, AdmTercero.id == OpeCotizacion.cliente_id).filter(
+            or_(
+                OpeOperacion.numero.ilike(like),
+                AdmTercero.razon_social.ilike(like),
+                AdmTercero.nit.ilike(like),
+            )
+        )
+    if needs_join:
+        q = q.distinct()
     if estado:
         q = q.filter(OpeOperacion.estado == estado)
-    if busqueda:
-        q = q.filter(OpeOperacion.numero.ilike(f"%{busqueda}%"))
     if fecha_desde:
         q = q.filter(OpeOperacion.fecha_apertura >= fecha_desde)
     if fecha_hasta:

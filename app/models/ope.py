@@ -5,7 +5,7 @@ import uuid
 
 from sqlalchemy import (
     Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index,
-    Integer, Numeric, SmallInteger, String, Text, UniqueConstraint, func,
+    Integer, Numeric, SmallInteger, String, Text, UniqueConstraint, func, text,
 )
 from sqlalchemy.dialects import postgresql as pg
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -75,9 +75,12 @@ class OpeConcepto(Base, AuditMixin):
     # Parámetros de facturación (una factura de venta se arma desde el concepto).
     cuenta_ingreso_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
     tarifa_iva_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_tarifa_iva.id"), nullable=True)
+    um_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("inv_unidad_medida.id"), nullable=True)
+    es_valor_tercero: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=text("false"))
 
     cuenta_ingreso: Mapped[Optional["CntCuenta"]] = relationship("CntCuenta", foreign_keys=[cuenta_ingreso_id])
     tarifa_iva: Mapped[Optional["AdmTarifaIva"]] = relationship("AdmTarifaIva", foreign_keys=[tarifa_iva_id])
+    um: Mapped[Optional["InvUnidadMedida"]] = relationship("InvUnidadMedida", foreign_keys=[um_id])
     lineas: Mapped[list["OpeCotizacionLinea"]] = relationship("OpeCotizacionLinea", back_populates="concepto")
 
 
@@ -152,12 +155,17 @@ class OpeCotizacionLinea(Base):
     total_costo: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0, nullable=False)
     moneda: Mapped[str] = mapped_column(String(3), nullable=False)
     proveedor_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=True)
+    valor_tercero: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=text("false"))
     condiciones_costo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     notas: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     cotizacion: Mapped["OpeCotizacion"] = relationship("OpeCotizacion", back_populates="lineas")
     concepto: Mapped[Optional["OpeConcepto"]] = relationship("OpeConcepto", back_populates="lineas")
     proveedor: Mapped[Optional["AdmTercero"]] = relationship("AdmTercero", foreign_keys=[proveedor_id])
+
+    @property
+    def proveedor_nombre(self) -> Optional[str]:
+        return self.proveedor.razon_social if self.proveedor else None
 
 
 # ---------------------------------------------------------------------------

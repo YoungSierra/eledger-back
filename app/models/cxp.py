@@ -28,7 +28,7 @@ class CxpDocumento(Base, AuditMixin):
     __tablename__ = "cxp_documento"
     __table_args__ = (
         UniqueConstraint("numero", name="uq_cxp_numero"),
-        CheckConstraint("tipo IN ('FACTURA','COMPROBANTE','NOTA_CREDITO','NOTA_DEBITO','ANTICIPO')", name="chk_cxp_tipo"),
+        CheckConstraint("tipo IN ('FACTURA','COMPROBANTE','NOTA_CREDITO','NOTA_DEBITO','ANTICIPO','VRT')", name="chk_cxp_tipo"),
         CheckConstraint("estado IN ('borrador','contabilizado','anulado')", name="chk_cxp_estado"),
         CheckConstraint("saldo >= 0", name="chk_cxp_saldo"),
         CheckConstraint("total >= 0", name="chk_cxp_total"),

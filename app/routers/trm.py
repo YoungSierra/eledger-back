@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.core.permisos import require_permission
-from app.models.admin import AdmMoneda, AdmModulo, AdmOpcion, AdmPermisoOpcion, AdmTrm
+from app.models.admin import AdmMoneda, AdmOpcion, AdmPermisoOpcion, AdmTrm
 from app.schemas.auth import UsuarioActual
 
 router = APIRouter(prefix="/trm", tags=["TRM"])
@@ -57,14 +57,13 @@ def _fetch_sugerida() -> Decimal | None:
 
 
 def _puede_editar(db: Session, rol_id: str) -> bool:
+    # Permiso de editar específicamente sobre la opción TRM (no cualquier opción de administración).
     return bool(
         db.query(AdmPermisoOpcion)
         .join(AdmOpcion, AdmPermisoOpcion.opcion_id == AdmOpcion.id)
-        .join(AdmModulo, AdmOpcion.modulo_id == AdmModulo.id)
         .filter(
             AdmPermisoOpcion.rol_id == uuid.UUID(rol_id),
-            AdmModulo.codigo == "administracion",
-            AdmModulo.activo == True,
+            AdmOpcion.codigo == "trm",
             AdmOpcion.activo == True,
             AdmPermisoOpcion.puede_editar == True,
         )

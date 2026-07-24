@@ -47,6 +47,8 @@ class LineaFacCreate(BaseModel):
     centro_costo_id: Optional[uuid.UUID] = None
     cotizacion_linea_id: Optional[uuid.UUID] = None
     monto_cotizacion: Optional[Decimal] = None
+    valor_tercero: bool = False
+    proveedor_id: Optional[uuid.UUID] = None
 
 
 class LineaFacResponse(BaseModel):
@@ -77,6 +79,9 @@ class LineaFacResponse(BaseModel):
     centro_costo_nombre: Optional[str] = None
     cotizacion_linea_id: Optional[uuid.UUID] = None
     monto_cotizacion: Optional[Decimal] = None
+    valor_tercero: bool = False
+    proveedor_id: Optional[uuid.UUID] = None
+    proveedor_nombre: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -108,6 +113,25 @@ class FacFacturaUpdate(BaseModel):
 
 class AnularFacturaRequest(BaseModel):
     motivo: str
+
+
+class PreviewAsientoLinea(BaseModel):
+    cuenta_codigo: Optional[str] = None
+    cuenta_nombre: Optional[str] = None
+    tercero_nombre: Optional[str] = None
+    centro_costo: Optional[str] = None
+    debito: Decimal = Decimal("0")
+    credito: Decimal = Decimal("0")
+
+
+class PreviewAsientoResponse(BaseModel):
+    lineas: list[PreviewAsientoLinea]
+    total_debito: Decimal
+    total_credito: Decimal
+    cuadra: bool
+    moneda_codigo: Optional[str] = None
+    avisos: list[str] = []
+    asiento_numero: Optional[int] = None
 
 
 class FacturarCotizacionLineaReq(BaseModel):
@@ -183,6 +207,9 @@ class FacFacturaListItem(BaseModel):
     estado: str
     dian_estado: Optional[str] = None
     dias_vencimiento: Optional[int] = None
+    saldo: Optional[Decimal] = None
+    pagada: bool = False
+    creado_en: datetime
 
     model_config = {"from_attributes": True}
 

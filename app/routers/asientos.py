@@ -25,10 +25,11 @@ def listar(
     tipo_documento_id: Optional[uuid.UUID] = None,
     fecha_desde: Optional[str] = None,
     fecha_hasta: Optional[str] = None,
+    tercero_id: Optional[uuid.UUID] = None,
     db: Session = Depends(get_db),
     actor: UsuarioActual = Depends(get_current_user),
 ):
-    return asientos_service.listar(db, pagina, por_pagina, estado, tipo_documento_id, fecha_desde, fecha_hasta)
+    return asientos_service.listar(db, pagina, por_pagina, estado, tipo_documento_id, fecha_desde, fecha_hasta, tercero_id)
 
 
 @router.post("", response_model=AsientoResponse, status_code=201)

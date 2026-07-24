@@ -111,6 +111,8 @@ class OpeConceptoCreate(BaseModel):
     cuenta_id: Optional[uuid.UUID] = None
     cuenta_ingreso_id: Optional[uuid.UUID] = None
     tarifa_iva_id: Optional[uuid.UUID] = None
+    um_id: Optional[uuid.UUID] = None
+    es_valor_tercero: bool = False
 
 
 class OpeConceptoUpdate(BaseModel):
@@ -121,6 +123,8 @@ class OpeConceptoUpdate(BaseModel):
     cuenta_id: Optional[uuid.UUID] = None
     cuenta_ingreso_id: Optional[uuid.UUID] = None
     tarifa_iva_id: Optional[uuid.UUID] = None
+    um_id: Optional[uuid.UUID] = None
+    es_valor_tercero: Optional[bool] = None
     activo: Optional[bool] = None
 
 
@@ -135,6 +139,9 @@ class OpeConceptoResponse(BaseModel):
     cuenta_ingreso_nombre: Optional[str] = None
     tarifa_iva_id: Optional[uuid.UUID] = None
     tarifa_iva_nombre: Optional[str] = None
+    um_id: Optional[uuid.UUID] = None
+    um_codigo: Optional[str] = None
+    es_valor_tercero: bool = False
     activo: bool
     creado_en: datetime
 
@@ -157,6 +164,7 @@ class OpeCotizacionLineaCreate(BaseModel):
     minimo: Optional[Decimal] = None
     moneda: MonedaType
     proveedor_id: Optional[uuid.UUID] = None
+    valor_tercero: bool = False
     condiciones_costo: Optional[str] = None
     notas: Optional[str] = None
 
@@ -187,6 +195,7 @@ class OpeCotizacionLineaUpdate(BaseModel):
     minimo: Optional[Decimal] = None
     moneda: Optional[MonedaType] = None
     proveedor_id: Optional[uuid.UUID] = None
+    valor_tercero: Optional[bool] = None
     condiciones_costo: Optional[str] = None
     notas: Optional[str] = None
 
@@ -207,6 +216,8 @@ class OpeCotizacionLineaResponse(BaseModel):
     total_costo: Decimal
     moneda: MonedaType
     proveedor_id: Optional[uuid.UUID]
+    proveedor_nombre: Optional[str] = None
+    valor_tercero: bool = False
     condiciones_costo: Optional[str]
     notas: Optional[str]
 

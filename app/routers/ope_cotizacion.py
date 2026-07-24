@@ -157,12 +157,14 @@ def operacion_de_cotizacion(
 @router.get("/{cotizacion_id}/facturacion")
 def estado_facturacion(
     cotizacion_id: uuid.UUID,
+    excluir_factura_id: Optional[uuid.UUID] = Query(None),
     db: Session = Depends(get_db),
     actor: UsuarioActual = Depends(get_current_user),
 ):
-    """Estado de facturación de la cotización: por línea, facturado vs pendiente."""
+    """Estado de facturación de la cotización: por línea, facturado vs pendiente.
+    `excluir_factura_id` descuenta esa factura del cálculo (al editarla)."""
     from app.services import facturacion_service
-    return facturacion_service.estado_facturacion_cotizacion(db, cotizacion_id)
+    return facturacion_service.estado_facturacion_cotizacion(db, cotizacion_id, excluir_factura_id)
 
 
 @router.get("/{cotizacion_id}/margen", response_model=OpeCotizacionMargenResponse)

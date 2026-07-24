@@ -9,6 +9,7 @@ class CxcParametroUpdate(BaseModel):
     cuenta_clientes_id: Optional[uuid.UUID] = None
     cuenta_ingresos_id: Optional[uuid.UUID] = None
     cuenta_iva_id: Optional[uuid.UUID] = None
+    cuenta_valores_terceros_id: Optional[uuid.UUID] = None
 
 
 class CxcParametroResponse(BaseModel):
@@ -19,6 +20,8 @@ class CxcParametroResponse(BaseModel):
     cuenta_ingresos_display: Optional[str]
     cuenta_iva_id: Optional[uuid.UUID]
     cuenta_iva_display: Optional[str]
+    cuenta_valores_terceros_id: Optional[uuid.UUID]
+    cuenta_valores_terceros_display: Optional[str]
 
 
 class CxpParametroUpdate(BaseModel):

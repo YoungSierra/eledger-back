@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Optional
 import uuid
 
-from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime, ForeignKey, Integer, Numeric, SmallInteger, String, Table, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime, ForeignKey, Integer, Numeric, SmallInteger, String, Table, Text, UniqueConstraint, text
 from sqlalchemy.dialects import postgresql as pg
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -112,9 +112,17 @@ class FacFacturaLinea(Base):
     # cotización (para el seguimiento de saldo, independiente de la moneda de la factura).
     cotizacion_linea_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_cotizacion_linea.id"), nullable=True, index=True)
     monto_cotizacion: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    # Valor recibido para tercero: no es ingreso ni IVA propio; se traslada al proveedor.
+    valor_tercero: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=text("false"))
+    proveedor_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=True)
     orden: Mapped[int] = mapped_column(SmallInteger, default=1, nullable=False)
 
     factura: Mapped["FacFactura"] = relationship("FacFactura", back_populates="lineas")
+    proveedor: Mapped[Optional["AdmTercero"]] = relationship("AdmTercero", foreign_keys=[proveedor_id])
+
+    @property
+    def proveedor_nombre(self) -> Optional[str]:
+        return self.proveedor.razon_social if self.proveedor else None
 
 
 class FacFacturaRetencion(Base):
