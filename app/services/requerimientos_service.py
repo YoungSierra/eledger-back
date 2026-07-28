@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.models.req import ReqRequerimiento, ReqMensaje
@@ -185,21 +185,19 @@ def agregar_mensaje(db: Session, req_id: uuid.UUID, data: MensajeCreate, actor: 
 
 
 def subir_adjunto(db: Session, req_id: uuid.UUID, archivo: UploadFile, actor: UsuarioActual) -> RequerimientoResponse:
-    from app.core.config import settings
+    from app.services import adjuntos_service
     r = obtener(db, req_id)
     contenido = archivo.file.read()
     if len(contenido) > MAX_ADJUNTO_BYTES:
         raise HTTPException(status_code=400, detail="El archivo supera el límite de 5 MB")
 
-    carpeta = settings.upload_path / "requerimientos"
-    carpeta.mkdir(parents=True, exist_ok=True)
-    suffix = Path(archivo.filename or "").suffix.lower()
-    nombre_disco = f"{r.id}{suffix}"
-    with open(carpeta / nombre_disco, "wb") as f:
-        f.write(contenido)
-
-    r.archivo_nombre = archivo.filename
-    r.archivo_ruta = str(Path("requerimientos") / nombre_disco)
+    # Registro unificado en adm_adjunto (uno por requerimiento).
+    a = adjuntos_service.crear(
+        db, "req_requerimiento", r.id, archivo.filename or "archivo",
+        contenido, archivo.content_type, uuid.UUID(actor.id), reemplazar_unico=True,
+    )
+    r.archivo_nombre = a.nombre_archivo
+    r.archivo_ruta = str(a.id)  # puntero al adjunto unificado
     r.modificado_por = uuid.UUID(actor.id)
     r.modificado_en = datetime.now(timezone.utc)
     db.commit()
@@ -207,12 +205,28 @@ def subir_adjunto(db: Session, req_id: uuid.UUID, archivo: UploadFile, actor: Us
     return _detalle(db, r)
 
 
-def descargar_adjunto(db: Session, req_id: uuid.UUID) -> FileResponse:
+def descargar_adjunto(db: Session, req_id: uuid.UUID):
     from app.core.config import settings
+    from app.core import almacenamiento
+    from app.models.adjuntos import AdmAdjunto
     r = obtener(db, req_id)
     if not r.archivo_ruta:
         raise HTTPException(status_code=404, detail="Sin adjunto")
-    ruta = settings.upload_path / r.archivo_ruta
-    if not ruta.exists():
-        raise HTTPException(status_code=404, detail="Archivo no encontrado en disco")
-    return FileResponse(path=str(ruta), filename=r.archivo_nombre or Path(r.archivo_ruta).name)
+    adj = None
+    try:
+        adj = db.get(AdmAdjunto, uuid.UUID(str(r.archivo_ruta)))
+    except (ValueError, AttributeError):
+        adj = None
+    if adj:
+        key, nombre = adj.storage_key, adj.nombre_archivo
+    else:
+        key, nombre = r.archivo_ruta, (r.archivo_nombre or Path(r.archivo_ruta).name)  # legacy
+    ruta = settings.upload_path / str(key).replace("\\", "/")
+    if ruta.exists():
+        return FileResponse(path=str(ruta), filename=nombre)
+    try:
+        data = almacenamiento.leer(key)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    return StreamingResponse(iter([data]), media_type="application/octet-stream",
+                             headers={"Content-Disposition": f'attachment; filename="{nombre}"'})

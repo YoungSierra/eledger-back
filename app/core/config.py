@@ -34,6 +34,27 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = []
     CORS_ORIGIN_REGEX: str = r"http://(localhost|127\.0\.0\.1):\d+"
 
+    # ── Almacenamiento de adjuntos (Cloudflare R2, compatible S3) ──
+    # Si R2_BUCKET está vacío, los adjuntos usan almacenamiento local (UPLOAD_DIR).
+    R2_ACCOUNT_ID: str = ""          # <accountid> del panel de R2
+    R2_ACCESS_KEY_ID: str = ""
+    R2_SECRET_ACCESS_KEY: str = ""
+    R2_BUCKET: str = ""
+    R2_ENDPOINT: str = ""            # opcional; si vacío se arma con el account id
+    R2_PUBLIC_BASE_URL: str = ""     # opcional; dominio público/custom para servir archivos
+
+    @property
+    def r2_endpoint(self) -> str:
+        if self.R2_ENDPOINT:
+            return self.R2_ENDPOINT
+        if self.R2_ACCOUNT_ID:
+            return f"https://{self.R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+        return ""
+
+    @property
+    def r2_enabled(self) -> bool:
+        return bool(self.R2_BUCKET and self.R2_ACCESS_KEY_ID and self.R2_SECRET_ACCESS_KEY and self.r2_endpoint)
+
     model_config = {"env_file": ".env", "case_sensitive": True}
 
 

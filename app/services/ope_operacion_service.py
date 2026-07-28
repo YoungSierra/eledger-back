@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -548,18 +548,14 @@ def subir_archivo(
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado")
 
-    # Carpeta por operación
-    carpeta = upload_path / str(operacion_id)
-    carpeta.mkdir(parents=True, exist_ok=True)
-
-    suffix = Path(archivo.filename or "").suffix.lower()
-    nombre_archivo = f"{documento_id}{suffix}"
-    ruta = carpeta / nombre_archivo
-
-    with open(ruta, "wb") as f:
-        f.write(archivo.file.read())
-
-    doc.archivo = str(Path(str(operacion_id)) / nombre_archivo)
+    # El archivo se registra en la tabla unificada adm_adjunto (uno por documento).
+    from app.services import adjuntos_service
+    a = adjuntos_service.crear(
+        db, "ope_documento", doc.id, archivo.filename or "archivo",
+        archivo.file.read(), archivo.content_type, uuid.UUID(actor.id),
+        reemplazar_unico=True,
+    )
+    doc.archivo = str(a.id)  # puntero al adjunto unificado
     db.commit()
     db.refresh(doc)
     return doc
@@ -567,14 +563,33 @@ def subir_archivo(
 
 def descargar_archivo(
     db: Session, operacion_id: uuid.UUID, documento_id: uuid.UUID,
-) -> FileResponse:
+):
     from app.core.config import settings
+    from app.core import almacenamiento
+    from app.models.adjuntos import AdmAdjunto
     doc = db.query(OpeDocumento).filter(
         OpeDocumento.id == documento_id, OpeDocumento.operacion_id == operacion_id
     ).first()
     if not doc or not doc.archivo:
         raise HTTPException(status_code=404, detail="Archivo no encontrado")
-    ruta = settings.upload_path / doc.archivo
-    if not ruta.exists():
-        raise HTTPException(status_code=404, detail="Archivo no encontrado en disco")
-    return FileResponse(path=str(ruta), filename=Path(doc.archivo).name)
+
+    # Nuevo: doc.archivo es el id de un adm_adjunto
+    adj = None
+    try:
+        adj = db.get(AdmAdjunto, uuid.UUID(str(doc.archivo)))
+    except (ValueError, AttributeError):
+        adj = None
+    if adj:
+        key, nombre = adj.storage_key, adj.nombre_archivo
+    else:
+        key, nombre = doc.archivo, Path(doc.archivo).name  # legacy: ruta directa
+
+    ruta = settings.upload_path / str(key).replace("\\", "/")
+    if ruta.exists():
+        return FileResponse(path=str(ruta), filename=nombre)
+    try:
+        data = almacenamiento.leer(key)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    return StreamingResponse(iter([data]), media_type="application/octet-stream",
+                             headers={"Content-Disposition": f'attachment; filename="{nombre}"'})

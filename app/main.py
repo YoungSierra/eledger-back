@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
 from app.routers import (
     auth, usuarios, periodos, empresa, roles, menu, cuentas, centros_costo,
-    terceros, ope_catalogo, ope_cotizacion, ope_operacion, trm, portal, maestros, bancos, resoluciones, conceptos, inventario, consecutivos, configuracion, asientos, cxc, cxp, parametros, fac_facturas, fac_config_electronica, reportes, compras, remisiones, requerimientos,
+    terceros, ope_catalogo, ope_cotizacion, ope_operacion, trm, portal, maestros, bancos, resoluciones, conceptos, inventario, consecutivos, configuracion, asientos, cxc, cxp, parametros, fac_facturas, fac_config_electronica, reportes, compras, remisiones, requerimientos, adjuntos,
 )
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
@@ -61,6 +61,7 @@ app.include_router(reportes.router)
 app.include_router(compras.router)
 app.include_router(remisiones.router)
 app.include_router(requerimientos.router)
+app.include_router(adjuntos.router)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
