@@ -1,9 +1,32 @@
+from datetime import date
 from decimal import Decimal
 from typing import Any, Optional
 import uuid
 from pydantic import BaseModel, Field
 
 FORMATOS_EXTRACTO = ("OFX", "CSV", "EXCEL")
+
+
+class MovimientoBancoItem(BaseModel):
+    fecha: date
+    asiento_numero: Optional[int] = None
+    documento_numero: Optional[str] = None
+    descripcion: Optional[str] = None
+    debito: Decimal
+    credito: Decimal
+    saldo: Decimal
+
+
+class MovimientosBancoResponse(BaseModel):
+    cuenta_id: uuid.UUID
+    cuenta_nombre: str
+    cuenta_contable_codigo: Optional[str] = None
+    saldo_inicial: Decimal
+    saldo_final: Decimal
+    total_debito: Decimal
+    total_credito: Decimal
+    items: list[MovimientoBancoItem]
+    aviso: Optional[str] = None
 
 
 class BancoCreate(BaseModel):

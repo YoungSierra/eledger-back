@@ -141,6 +141,8 @@ def _to_response(doc: CxcDocumento, db: Session) -> CxcDocumentoResponse:
         tarifa_iva_id=doc.tarifa_iva_id,
         condicion_pago_id=doc.condicion_pago_id,
         asiento_id=doc.asiento_id,
+        factura_afectada_id=doc.factura_afectada_id,
+        factura_afectada_numero=(db.get(CxcDocumento, doc.factura_afectada_id).numero if doc.factura_afectada_id and db.get(CxcDocumento, doc.factura_afectada_id) else None),
         asiento_modificado_manual=doc.asiento_modificado_manual,
         documento_origen_id=doc.documento_origen_id,
         ban_cuenta_id=doc.ban_cuenta_id,
@@ -165,6 +167,7 @@ def _to_list_item(doc: CxcDocumento, db: Session, hoy: date) -> CxcDocumentoList
         total=doc.total, saldo=doc.saldo,
         estado=doc.estado,
         dias_vencimiento=dias,
+        factura_afectada_numero=(db.get(CxcDocumento, doc.factura_afectada_id).numero if doc.factura_afectada_id and db.get(CxcDocumento, doc.factura_afectada_id) else None),
     )
 
 
@@ -199,13 +202,31 @@ def _poblar_lineas_asiento_cxc(
             add_linea(r.cuenta_id, Decimal("0"), r.valor)
 
     elif doc.tipo == "RECIBO":
+        # Cr Clientes = total abonado a cartera (Σ aplicaciones)
         add_linea(cuenta_cxc.id, Decimal("0"), doc.total)
-        if doc.ban_cuenta_id:
+        if doc.subtotal > 0 and doc.ban_cuenta_id:
             ban_cuenta = db.get(BanCuenta, doc.ban_cuenta_id)
             if ban_cuenta and ban_cuenta.cuenta_contable_id:
                 add_linea(ban_cuenta.cuenta_contable_id, doc.subtotal, Decimal("0"))
+        ret_total = sum((r.valor for r in doc.retenciones), Decimal("0"))
         for r in doc.retenciones:
             add_linea(r.cuenta_id, r.valor, Decimal("0"))
+        # Anticipos aplicados como fuente: Dr Anticipos de clientes (reclasifica el 2805).
+        anticipos_total = _anticipos_total_recibo(db, doc.id)
+        if anticipos_total > 0:
+            cuenta_ant = _cuenta_anticipos(db)
+            if cuenta_ant:
+                add_linea(cuenta_ant.id, anticipos_total, Decimal("0"))
+        # Ajuste = abonado − (efectivo + retenciones + anticipos)
+        ajuste = doc.total - doc.subtotal - ret_total - anticipos_total
+        if ajuste > 0:            # descuento concedido: Dr Descuentos
+            cuenta_desc = _cuenta_descuentos(db)
+            if cuenta_desc:
+                add_linea(cuenta_desc.id, ajuste, Decimal("0"))
+        elif ajuste < 0:          # aprovechamiento: Cr Aprovechamientos
+            cuenta_apr = _cuenta_aprovechamientos(db)
+            if cuenta_apr:
+                add_linea(cuenta_apr.id, Decimal("0"), -ajuste)
 
     elif doc.tipo == "NOTA_CREDITO":
         add_linea(cuenta_cxc.id,      Decimal("0"), doc.total)
@@ -214,6 +235,16 @@ def _poblar_lineas_asiento_cxc(
     elif doc.tipo == "NOTA_DEBITO":
         add_linea(cuenta_cxc.id,      doc.total,    Decimal("0"))
         add_linea(cuenta_ingresos.id, Decimal("0"), doc.total)
+
+    elif doc.tipo == "ANTICIPO":
+        # Recaudo directo por adelantado: Dr Banco / Cr Anticipos de clientes.
+        cuenta_ant = _cuenta_anticipos(db)
+        if doc.ban_cuenta_id:
+            ban_cuenta = db.get(BanCuenta, doc.ban_cuenta_id)
+            if ban_cuenta and ban_cuenta.cuenta_contable_id:
+                add_linea(ban_cuenta.cuenta_contable_id, doc.total, Decimal("0"))
+        if cuenta_ant:
+            add_linea(cuenta_ant.id, Decimal("0"), doc.total)
 
 
 def _construir_preview_cxc(db: Session, doc: CxcDocumento) -> "PreviewAsientoResponse":
@@ -245,16 +276,42 @@ def _construir_preview_cxc(db: Session, doc: CxcDocumento) -> "PreviewAsientoRes
             add(db.get(CntCuenta, r.cuenta_id) if r.cuenta_id else None, Decimal("0"), r.valor)
     elif doc.tipo == "RECIBO":
         add(cuenta_cxc, Decimal("0"), doc.total)
-        ban = db.get(BanCuenta, doc.ban_cuenta_id) if doc.ban_cuenta_id else None
-        add(db.get(CntCuenta, ban.cuenta_contable_id) if ban and ban.cuenta_contable_id else None, doc.subtotal, Decimal("0"))
+        if doc.subtotal > 0:
+            ban = db.get(BanCuenta, doc.ban_cuenta_id) if doc.ban_cuenta_id else None
+            add(db.get(CntCuenta, ban.cuenta_contable_id) if ban and ban.cuenta_contable_id else None, doc.subtotal, Decimal("0"))
+        ret_total = sum((r.valor for r in doc.retenciones), Decimal("0"))
         for r in doc.retenciones:
             add(db.get(CntCuenta, r.cuenta_id) if r.cuenta_id else None, r.valor, Decimal("0"))
+        anticipos_total = getattr(doc, "_anticipos_total", Decimal("0"))
+        if anticipos_total > 0:
+            cuenta_ant = _cuenta_anticipos(db)
+            if not cuenta_ant:
+                avisos.append("Falta la cuenta de Anticipos de clientes en Parámetros CxC.")
+            add(cuenta_ant, anticipos_total, Decimal("0"))
+        ajuste = doc.total - doc.subtotal - ret_total - anticipos_total
+        if ajuste > 0:
+            cuenta_desc = _cuenta_descuentos(db)
+            if not cuenta_desc:
+                avisos.append("Falta la cuenta de Descuentos en Parámetros CxC.")
+            add(cuenta_desc, ajuste, Decimal("0"))
+        elif ajuste < 0:
+            cuenta_apr = _cuenta_aprovechamientos(db)
+            if not cuenta_apr:
+                avisos.append("Falta la cuenta de Aprovechamientos en Parámetros CxC.")
+            add(cuenta_apr, Decimal("0"), -ajuste)
     elif doc.tipo == "NOTA_CREDITO":
         add(cuenta_cxc, Decimal("0"), doc.total)
         add(cuenta_ingresos, doc.total, Decimal("0"))
     elif doc.tipo == "NOTA_DEBITO":
         add(cuenta_cxc, doc.total, Decimal("0"))
         add(cuenta_ingresos, Decimal("0"), doc.total)
+    elif doc.tipo == "ANTICIPO":
+        cuenta_ant = _cuenta_anticipos(db)
+        ban = db.get(BanCuenta, doc.ban_cuenta_id) if doc.ban_cuenta_id else None
+        add(db.get(CntCuenta, ban.cuenta_contable_id) if ban and ban.cuenta_contable_id else None, doc.total, Decimal("0"))
+        if not cuenta_ant:
+            avisos.append("Falta la cuenta de Anticipos de clientes en Parámetros CxC.")
+        add(cuenta_ant, Decimal("0"), doc.total)
 
     total_d = sum((l.debito for l in lineas), Decimal("0"))
     total_c = sum((l.credito for l in lineas), Decimal("0"))
@@ -272,6 +329,7 @@ def preview_asiento_documento(db: Session, data) -> "PreviewAsientoResponse":
         tipo=data.tipo, tercero_id=data.tercero_id, moneda_id=data.moneda_id,
         trm=data.trm, subtotal=data.subtotal, total_iva=data.total_iva,
         total_retenciones=data.total_retenciones, total=total,
+        ban_cuenta_id=getattr(data, "ban_cuenta_id", None),
     )
     doc.retenciones = list(data.retenciones)
     return _construir_preview_cxc(db, doc)
@@ -279,13 +337,15 @@ def preview_asiento_documento(db: Session, data) -> "PreviewAsientoResponse":
 
 def preview_asiento_recibo(db: Session, data) -> "PreviewAsientoResponse":
     ret_total = sum((r.valor for r in data.retenciones), Decimal("0"))
-    total = data.valor_recibido + ret_total
+    ant_total = sum((a.valor for a in getattr(data, "anticipos", [])), Decimal("0"))
+    abonado = sum((a.valor for a in data.aplicaciones), Decimal("0"))   # Cr Clientes = Σ aplicaciones
     doc = CxcDocumento(
         tipo="RECIBO", tercero_id=data.tercero_id, moneda_id=data.moneda_id,
         trm=data.trm, subtotal=data.valor_recibido, total_iva=Decimal("0"),
-        total_retenciones=ret_total, total=total, ban_cuenta_id=data.ban_cuenta_id,
+        total_retenciones=ret_total, total=abonado, ban_cuenta_id=data.ban_cuenta_id,
     )
     doc.retenciones = list(data.retenciones)
+    doc._anticipos_total = ant_total
     return _construir_preview_cxc(db, doc)
 
 
@@ -332,9 +392,37 @@ def _resolver_parametros_cxc(db: Session, tipo: str):
     cuenta_iva_p    = db.get(CntCuenta, params.cuenta_iva_id)      if params.cuenta_iva_id      else None
     if not cuenta_cxc:
         return None
-    if tipo != "RECIBO" and not cuenta_ingresos:
+    if tipo not in ("RECIBO", "ANTICIPO") and not cuenta_ingresos:
         return None
     return cuenta_cxc, cuenta_ingresos, cuenta_iva_p
+
+
+def _cuenta_anticipos(db: Session) -> CntCuenta | None:
+    params = db.query(CxcParametroContable).first()
+    return db.get(CntCuenta, params.cuenta_anticipos_id) if params and params.cuenta_anticipos_id else None
+
+
+def _cuenta_descuentos(db: Session) -> CntCuenta | None:
+    params = db.query(CxcParametroContable).first()
+    return db.get(CntCuenta, params.cuenta_descuentos_id) if params and params.cuenta_descuentos_id else None
+
+
+def _cuenta_aprovechamientos(db: Session) -> CntCuenta | None:
+    params = db.query(CxcParametroContable).first()
+    return db.get(CntCuenta, params.cuenta_aprovechamientos_id) if params and params.cuenta_aprovechamientos_id else None
+
+
+def _anticipos_total_recibo(db: Session, recibo_id) -> Decimal:
+    """Σ de anticipos consumidos por un recibo (credito=anticipo, debito=recibo)."""
+    if not recibo_id:
+        return Decimal("0")
+    total = Decimal("0")
+    apps = db.query(CxcAplicacion).filter(CxcAplicacion.documento_debito_id == recibo_id).all()
+    for ap in apps:
+        cred = db.get(CxcDocumento, ap.documento_credito_id)
+        if cred and cred.tipo == "ANTICIPO":
+            total += ap.valor
+    return total
 
 
 def _generar_asiento_cxc(db: Session, doc: CxcDocumento, actor: UsuarioActual) -> CntAsiento | None:
@@ -400,7 +488,7 @@ def listar(
 
     total = q.count()
     hoy = date.today()
-    rows = q.order_by(CxcDocumento.fecha.desc()).offset((pagina - 1) * por_pagina).limit(por_pagina).all()
+    rows = q.order_by(CxcDocumento.fecha.desc(), CxcDocumento.numero.desc()).offset((pagina - 1) * por_pagina).limit(por_pagina).all()
     return CxcListResponse(
         items=[_to_list_item(r, db, hoy) for r in rows],
         total=total, pagina=pagina, por_pagina=por_pagina,
@@ -421,15 +509,14 @@ def crear(db: Session, data: CxcDocumentoCreate, actor: UsuarioActual) -> CxcDoc
     if data.moneda_id != moneda_func.id and not data.trm:
         raise HTTPException(status_code=400, detail="Se requiere TRM para moneda extranjera")
 
-    existe = db.query(CxcDocumento).filter(CxcDocumento.numero == data.numero).first()
-    if existe:
-        raise HTTPException(status_code=409, detail=f"El número {data.numero} ya existe")
+    # Factura: número manual (documento externo). Anticipo/notas: consecutivo automático.
+    numero = _generar_o_validar_numero(db, data.tipo, data.numero)
 
     total = _calcular_totales(data.subtotal, data.total_iva, data.total_retenciones)
 
     doc = CxcDocumento(
         id=uuid.uuid4(),
-        numero=data.numero,
+        numero=numero,
         tipo=data.tipo,
         fecha=data.fecha,
         fecha_vencimiento=data.fecha_vencimiento,
@@ -445,6 +532,8 @@ def crear(db: Session, data: CxcDocumentoCreate, actor: UsuarioActual) -> CxcDoc
         descripcion=data.descripcion,
         tarifa_iva_id=data.tarifa_iva_id,
         condicion_pago_id=data.condicion_pago_id,
+        ban_cuenta_id=data.ban_cuenta_id,
+        factura_afectada_id=data.factura_afectada_id,
         estado="borrador",
         creado_por=uuid.UUID(actor.id),
     )
@@ -482,6 +571,8 @@ def actualizar(db: Session, id: uuid.UUID, data: CxcDocumentoUpdate, actor: Usua
     if data.descripcion is not None:       doc.descripcion = data.descripcion
     if data.tarifa_iva_id is not None:     doc.tarifa_iva_id = data.tarifa_iva_id
     if data.condicion_pago_id is not None: doc.condicion_pago_id = data.condicion_pago_id
+    if data.ban_cuenta_id is not None:     doc.ban_cuenta_id = data.ban_cuenta_id
+    if data.factura_afectada_id is not None: doc.factura_afectada_id = data.factura_afectada_id
 
     if any(v is not None for v in [data.subtotal, data.total_iva, data.total_retenciones]):
         subtotal = data.subtotal if data.subtotal is not None else doc.subtotal
@@ -529,6 +620,9 @@ def contabilizar(db: Session, id: uuid.UUID, actor: UsuarioActual) -> CxcDocumen
     if doc.tipo in ("FACTURA", "NOTA_DEBITO") and not doc.fecha_vencimiento:
         raise HTTPException(status_code=400, detail="La fecha de vencimiento es obligatoria")
 
+    if doc.tipo in ("NOTA_CREDITO", "NOTA_DEBITO") and not doc.factura_afectada_id:
+        raise HTTPException(status_code=400, detail="La nota debe referenciar la factura afectada antes de contabilizar")
+
     # Para RECIBO: procesar aplicaciones pendientes y actualizar saldos de facturas
     if doc.tipo == "RECIBO":
         apps = db.query(CxcAplicacion).filter(
@@ -550,6 +644,22 @@ def contabilizar(db: Session, id: uuid.UUID, actor: UsuarioActual) -> CxcDocumen
                     detail=f"El saldo de la factura {fac.numero} cambió ({fac.saldo}). Revisa el recibo."
                 )
             fac.saldo -= ap.valor
+            ap.estado = "aplicado"
+        # Consumo de anticipos: reduce el saldo de cada anticipo (credito = anticipo, debito = recibo)
+        ant_apps = db.query(CxcAplicacion).filter(
+            CxcAplicacion.documento_debito_id == id,
+            CxcAplicacion.estado == "pendiente",
+        ).all()
+        for ap in ant_apps:
+            ant = db.query(CxcDocumento).filter(
+                CxcDocumento.id == ap.documento_credito_id,
+                CxcDocumento.activo == True,
+            ).with_for_update().first()
+            if not ant or ant.tipo != "ANTICIPO":
+                raise HTTPException(status_code=400, detail="Anticipo aplicado no encontrado")
+            if ap.valor > ant.saldo:
+                raise HTTPException(status_code=400, detail=f"El saldo del anticipo {ant.numero} cambió ({ant.saldo}). Revisa el recibo.")
+            ant.saldo -= ap.valor
             ap.estado = "aplicado"
         doc.saldo = Decimal("0")
 
@@ -610,6 +720,22 @@ def contabilizar(db: Session, id: uuid.UUID, actor: UsuarioActual) -> CxcDocumen
     doc.modificado_por = uuid.UUID(actor.id)
     doc.modificado_en = datetime.now(timezone.utc)
 
+    # Nota crédito: cruce automático contra la factura afectada (reduce ambos saldos,
+    # ambos viven en Clientes → sin asiento adicional).
+    if doc.tipo == "NOTA_CREDITO" and doc.factura_afectada_id:
+        fac = db.query(CxcDocumento).filter(
+            CxcDocumento.id == doc.factura_afectada_id, CxcDocumento.activo == True
+        ).with_for_update().first()
+        if fac and fac.estado == "contabilizado" and fac.saldo > 0:
+            valor = min(doc.saldo, fac.saldo)
+            if valor > 0:
+                db.add(CxcAplicacion(
+                    id=uuid.uuid4(), documento_credito_id=doc.id, documento_debito_id=fac.id,
+                    valor=valor, fecha=doc.fecha, estado="aplicado", creado_por=uuid.UUID(actor.id),
+                ))
+                doc.saldo -= valor
+                fac.saldo -= valor
+
     db.commit()
     db.refresh(doc)
     return _to_response(doc, db)
@@ -634,6 +760,12 @@ def anular(db: Session, id: uuid.UUID, data: AnularRequest, actor: UsuarioActual
         CxcAplicacion.documento_credito_id == id,
         CxcAplicacion.estado == "pendiente",
     ).delete()
+    # Eliminar consumos de anticipo pendientes de un recibo en borrador (debito = recibo)
+    if doc.tipo == "RECIBO":
+        db.query(CxcAplicacion).filter(
+            CxcAplicacion.documento_debito_id == id,
+            CxcAplicacion.estado == "pendiente",
+        ).delete()
 
     # Si está contabilizado: validar período y generar contraasiento que reversa el original.
     if doc.estado == "contabilizado":
@@ -705,8 +837,81 @@ def aplicar(db: Session, data: AplicarRequest, actor: UsuarioActual) -> dict:
     credito.saldo -= data.valor
     debito.saldo -= data.valor
 
+    # Cruce de ANTICIPO con factura: reclasifica el anticipo (2705) contra clientes (1305).
+    # (Las notas crédito ya viven en clientes, no requieren asiento adicional.)
+    if credito.tipo == "ANTICIPO":
+        cuenta_ant = _cuenta_anticipos(db)
+        params = db.query(CxcParametroContable).first()
+        cuenta_cli = db.get(CntCuenta, params.cuenta_clientes_id) if params and params.cuenta_clientes_id else None
+        if not cuenta_ant or not cuenta_cli:
+            raise HTTPException(status_code=400, detail="Faltan cuentas de anticipos/clientes en Parámetros CxC para cruzar el anticipo.")
+        periodo = _buscar_periodo(db, data.fecha)
+        moneda_func = _moneda_funcional(db)
+        trm = credito.trm or Decimal("1")
+        asiento_ant = db.get(CntAsiento, credito.asiento_id) if credito.asiento_id else None
+        asiento = CntAsiento(
+            id=uuid.uuid4(),
+            tipo_documento_id=asiento_ant.tipo_documento_id if asiento_ant else None,
+            documento_numero=None,
+            fecha=data.fecha,
+            periodo_id=periodo.id,
+            descripcion=f"CRUCE ANTICIPO {credito.numero} → {debito.numero}",
+            estado="publicado",
+            moneda_id=credito.moneda_id,
+            trm=credito.trm if credito.moneda_id != moneda_func.id else None,
+            documento_origen_id=credito.id,
+            documento_origen_tipo="cxc_aplicacion",
+            creado_por=uuid.UUID(actor.id),
+        )
+        db.add(asiento)
+        db.flush()
+        for orden, (cta_id, deb, cred) in enumerate(
+            [(cuenta_ant.id, data.valor, Decimal("0")), (cuenta_cli.id, Decimal("0"), data.valor)], start=1
+        ):
+            d_f = (deb * trm).quantize(Decimal("0.0001")) if credito.moneda_id != moneda_func.id else deb
+            c_f = (cred * trm).quantize(Decimal("0.0001")) if credito.moneda_id != moneda_func.id else cred
+            db.add(CntAsientoLinea(
+                id=uuid.uuid4(), asiento_id=asiento.id, orden=orden,
+                cuenta_id=cta_id, debito=deb, credito=cred,
+                debito_funcional=d_f, credito_funcional=c_f,
+                tercero_id=credito.tercero_id,
+            ))
+
     db.commit()
     return {"mensaje": f"Aplicación de {data.valor} registrada correctamente"}
+
+
+def notas_de_factura(db: Session, factura_id: uuid.UUID):
+    """Notas crédito/débito que referencian esta factura (factura_afectada_id)."""
+    from app.schemas.cxc import NotaRelacionadaItem
+    notas = db.query(CxcDocumento).filter(
+        CxcDocumento.factura_afectada_id == factura_id,
+        CxcDocumento.activo == True,
+        CxcDocumento.tipo.in_(["NOTA_CREDITO", "NOTA_DEBITO"]),
+    ).order_by(CxcDocumento.fecha.asc()).all()
+    return [
+        NotaRelacionadaItem(
+            id=n.id, numero=n.numero, tipo=n.tipo, fecha=n.fecha,
+            total=n.total, saldo=n.saldo, estado=n.estado,
+        )
+        for n in notas
+    ]
+
+
+def cruces_de_documento(db: Session, doc_id: uuid.UUID):
+    """Documentos (recibos, NC, ND, anticipos) aplicados a este documento (como débito)."""
+    from app.schemas.cxc import CruceItem
+    apps = db.query(CxcAplicacion).filter(CxcAplicacion.documento_debito_id == doc_id).all()
+    result = []
+    for ap in apps:
+        cred = db.get(CxcDocumento, ap.documento_credito_id)
+        if not cred:
+            continue
+        result.append(CruceItem(
+            id=ap.id, documento_id=cred.id, numero=cred.numero, tipo=cred.tipo,
+            fecha=ap.fecha, valor=ap.valor, estado=ap.estado,
+        ))
+    return result
 
 
 def aplicaciones_pendientes(db: Session, recibo_id: uuid.UUID) -> list[AplicacionPendienteItem]:
@@ -753,11 +958,11 @@ def actualizar_recibo(db: Session, recibo_id: uuid.UUID, data: ReciboCreate, act
         fac = db.query(CxcDocumento).filter(
             CxcDocumento.id == ap.factura_id,
             CxcDocumento.activo == True,
-            CxcDocumento.tipo == "FACTURA",
+            CxcDocumento.tipo.in_(["FACTURA", "NOTA_DEBITO"]),
             CxcDocumento.estado == "contabilizado",
         ).first()
         if not fac:
-            raise HTTPException(status_code=400, detail=f"Factura {ap.factura_id} no encontrada")
+            raise HTTPException(status_code=400, detail=f"Documento {ap.factura_id} no encontrado")
         if fac.tercero_id != data.tercero_id:
             raise HTTPException(status_code=400, detail=f"La factura {fac.numero} no pertenece al cliente")
         # El saldo disponible de la factura incluye lo que ya tenía pendiente de este recibo
@@ -770,7 +975,10 @@ def actualizar_recibo(db: Session, recibo_id: uuid.UUID, data: ReciboCreate, act
         if ap.valor > saldo_disp:
             raise HTTPException(status_code=400, detail=f"El valor supera el saldo de la factura {fac.numero}")
 
-    total = data.valor_recibido + total_retenciones
+    total_anticipos = _validar_anticipos_recibo(db, data.tercero_id, data.anticipos, excluir_recibo_id=recibo_id)
+    total_aplicado = sum((a.valor for a in data.aplicaciones), Decimal("0"))
+    _validar_ajuste_recibo(db, total_aplicado - (data.valor_recibido + total_retenciones + total_anticipos))
+    total = total_aplicado
 
     # Actualizar cabecera
     doc.fecha = data.fecha
@@ -798,7 +1006,7 @@ def actualizar_recibo(db: Session, recibo_id: uuid.UUID, data: ReciboCreate, act
             cuenta_id=ret.cuenta_id,
         ))
 
-    # Reemplazar aplicaciones pendientes
+    # Reemplazar aplicaciones pendientes (facturas: credito = recibo)
     db.query(CxcAplicacion).filter(
         CxcAplicacion.documento_credito_id == recibo_id,
         CxcAplicacion.estado == "pendiente",
@@ -809,6 +1017,21 @@ def actualizar_recibo(db: Session, recibo_id: uuid.UUID, data: ReciboCreate, act
             documento_credito_id=doc.id,
             documento_debito_id=ap.factura_id,
             valor=ap.valor, fecha=data.fecha,
+            estado="pendiente",
+            creado_por=uuid.UUID(actor.id),
+        ))
+
+    # Reemplazar consumos de anticipo pendientes (anticipo: debito = recibo)
+    db.query(CxcAplicacion).filter(
+        CxcAplicacion.documento_debito_id == recibo_id,
+        CxcAplicacion.estado == "pendiente",
+    ).delete()
+    for ant in data.anticipos:
+        db.add(CxcAplicacion(
+            id=uuid.uuid4(),
+            documento_credito_id=ant.anticipo_id,
+            documento_debito_id=doc.id,
+            valor=ant.valor, fecha=data.fecha,
             estado="pendiente",
             creado_por=uuid.UUID(actor.id),
         ))
@@ -852,7 +1075,7 @@ def facturas_pendientes(
         .filter(
             CxcDocumento.activo == True,
             CxcDocumento.tercero_id == tercero_id,
-            CxcDocumento.tipo == "FACTURA",
+            CxcDocumento.tipo.in_(["FACTURA", "NOTA_DEBITO"]),
             CxcDocumento.estado == "contabilizado",
             CxcDocumento.saldo > 0,
         )
@@ -881,6 +1104,83 @@ def facturas_pendientes(
     return result
 
 
+def _saldo_anticipo_disponible(db: Session, anticipo: CxcDocumento, excluir_recibo_id: uuid.UUID | None) -> Decimal:
+    """Saldo del anticipo menos los consumos pendientes de otros recibos en borrador."""
+    q = db.query(func.coalesce(func.sum(CxcAplicacion.valor), Decimal("0"))).filter(
+        CxcAplicacion.documento_credito_id == anticipo.id,
+        CxcAplicacion.estado == "pendiente",
+    )
+    if excluir_recibo_id:
+        q = q.filter(CxcAplicacion.documento_debito_id != excluir_recibo_id)
+    return anticipo.saldo - q.scalar()
+
+
+def anticipos_disponibles(db: Session, tercero_id: uuid.UUID, excluir_recibo_id: uuid.UUID | None = None):
+    from app.schemas.cxc import AnticipoDisponibleItem
+    docs = db.query(CxcDocumento).filter(
+        CxcDocumento.activo == True,
+        CxcDocumento.tercero_id == tercero_id,
+        CxcDocumento.tipo == "ANTICIPO",
+        CxcDocumento.estado == "contabilizado",
+        CxcDocumento.saldo > 0,
+    ).order_by(CxcDocumento.fecha.asc()).all()
+    result = []
+    for d in docs:
+        disp = _saldo_anticipo_disponible(db, d, excluir_recibo_id)
+        if disp <= 0:
+            continue
+        result.append(AnticipoDisponibleItem(
+            id=d.id, numero=d.numero, fecha=d.fecha, total=d.total, saldo=disp,
+        ))
+    return result
+
+
+def anticipos_aplicados(db: Session, recibo_id: uuid.UUID):
+    """Anticipos consumidos por un recibo (credito = anticipo, debito = recibo)."""
+    from app.schemas.cxc import AnticipoAplicadoItem
+    apps = db.query(CxcAplicacion).filter(
+        CxcAplicacion.documento_debito_id == recibo_id,
+        CxcAplicacion.estado.in_(["pendiente", "aplicado"]),
+    ).all()
+    result = []
+    for ap in apps:
+        ant = db.get(CxcDocumento, ap.documento_credito_id)
+        if not ant or ant.tipo != "ANTICIPO":
+            continue
+        result.append(AnticipoAplicadoItem(
+            anticipo_id=ant.id, numero=ant.numero, fecha=ant.fecha, valor=ap.valor,
+        ))
+    return result
+
+
+def _validar_ajuste_recibo(db: Session, ajuste: Decimal) -> None:
+    """Exige la cuenta de descuento/aprovechamiento según el signo del ajuste."""
+    if ajuste > 0 and not _cuenta_descuentos(db):
+        raise HTTPException(status_code=400, detail="Configura la cuenta de Descuentos en Administración → Parámetros CxC para registrar la diferencia.")
+    if ajuste < 0 and not _cuenta_aprovechamientos(db):
+        raise HTTPException(status_code=400, detail="Configura la cuenta de Aprovechamientos en Administración → Parámetros CxC para registrar la diferencia.")
+
+
+def _validar_anticipos_recibo(db: Session, tercero_id, anticipos, excluir_recibo_id) -> Decimal:
+    total = Decimal("0")
+    for ant in anticipos:
+        doc = db.query(CxcDocumento).filter(
+            CxcDocumento.id == ant.anticipo_id,
+            CxcDocumento.activo == True,
+            CxcDocumento.tipo == "ANTICIPO",
+            CxcDocumento.estado == "contabilizado",
+        ).first()
+        if not doc:
+            raise HTTPException(status_code=400, detail="Anticipo no encontrado o no contabilizado")
+        if doc.tercero_id != tercero_id:
+            raise HTTPException(status_code=400, detail=f"El anticipo {doc.numero} no pertenece al cliente")
+        disp = _saldo_anticipo_disponible(db, doc, excluir_recibo_id)
+        if ant.valor > disp:
+            raise HTTPException(status_code=400, detail=f"El valor del anticipo {doc.numero} ({ant.valor}) supera su saldo disponible ({disp})")
+        total += ant.valor
+    return total
+
+
 def crear_recibo(db: Session, data: ReciboCreate, actor: UsuarioActual) -> CxcDocumentoResponse:
     periodo = _buscar_periodo(db, data.fecha)
     moneda_func = _moneda_funcional(db)
@@ -900,11 +1200,11 @@ def crear_recibo(db: Session, data: ReciboCreate, actor: UsuarioActual) -> CxcDo
         fac = db.query(CxcDocumento).filter(
             CxcDocumento.id == ap.factura_id,
             CxcDocumento.activo == True,
-            CxcDocumento.tipo == "FACTURA",
+            CxcDocumento.tipo.in_(["FACTURA", "NOTA_DEBITO"]),
             CxcDocumento.estado == "contabilizado",
         ).first()
         if not fac:
-            raise HTTPException(status_code=400, detail=f"Factura {ap.factura_id} no encontrada o no contabilizada")
+            raise HTTPException(status_code=400, detail=f"Documento {ap.factura_id} no encontrado o no contabilizado")
         if fac.tercero_id != data.tercero_id:
             raise HTTPException(status_code=400, detail=f"La factura {fac.numero} no pertenece al cliente seleccionado")
         pendiente_otros = db.query(func.coalesce(func.sum(CxcAplicacion.valor), Decimal("0"))).filter(
@@ -915,8 +1215,15 @@ def crear_recibo(db: Session, data: ReciboCreate, actor: UsuarioActual) -> CxcDo
         if ap.valor > saldo_disp:
             raise HTTPException(status_code=400, detail=f"El valor a aplicar ({ap.valor}) supera el saldo disponible de la factura {fac.numero} ({saldo_disp})")
 
+    # Validar anticipos aplicados como fuente
+    total_anticipos = _validar_anticipos_recibo(db, data.tercero_id, data.anticipos, excluir_recibo_id=None)
+
+    # Ajuste = abonado a facturas − fondeo (efectivo + retenciones + anticipos)
+    total_aplicado = sum((a.valor for a in data.aplicaciones), Decimal("0"))
+    _validar_ajuste_recibo(db, total_aplicado - (data.valor_recibido + total_retenciones + total_anticipos))
+
     numero = _generar_o_validar_numero(db, "RECIBO", None)
-    total = data.valor_recibido + total_retenciones
+    total = total_aplicado
 
     doc = CxcDocumento(
         id=uuid.uuid4(),
@@ -958,6 +1265,17 @@ def crear_recibo(db: Session, data: ReciboCreate, actor: UsuarioActual) -> CxcDo
             creado_por=uuid.UUID(actor.id),
         ))
 
+    # Consumo de anticipos: credito = anticipo, debito = recibo
+    for ant in data.anticipos:
+        db.add(CxcAplicacion(
+            id=uuid.uuid4(),
+            documento_credito_id=ant.anticipo_id,
+            documento_debito_id=doc.id,
+            valor=ant.valor, fecha=data.fecha,
+            estado="pendiente",
+            creado_por=uuid.UUID(actor.id),
+        ))
+
     db.flush()
     db.refresh(doc)
 
@@ -985,10 +1303,16 @@ def resumen(db: Session, fecha_corte_str: str | None = None) -> CxcResumenRespon
     buckets: dict = defaultdict(lambda: {
         "corriente": Decimal("0"), "dias_1_30": Decimal("0"),
         "dias_31_60": Decimal("0"), "dias_61_90": Decimal("0"), "mas_90": Decimal("0"),
+        "a_favor": Decimal("0"),
     })
 
     for doc in docs:
         b = buckets[doc.tercero_id]
+        # NC y anticipos son crédito a favor del cliente: van a una columna aparte.
+        if doc.tipo in ("NOTA_CREDITO", "ANTICIPO"):
+            b["a_favor"] += doc.saldo
+            continue
+        # FACTURA / NOTA_DEBITO: cuenta por cobrar, se ubica por antigüedad.
         if doc.fecha_vencimiento is None or doc.fecha_vencimiento >= hoy:
             b["corriente"] += doc.saldo
         else:
@@ -1000,29 +1324,33 @@ def resumen(db: Session, fecha_corte_str: str | None = None) -> CxcResumenRespon
 
     items = []
     tot = {"corriente": Decimal("0"), "dias_1_30": Decimal("0"),
-           "dias_31_60": Decimal("0"), "dias_61_90": Decimal("0"), "mas_90": Decimal("0")}
+           "dias_31_60": Decimal("0"), "dias_61_90": Decimal("0"), "mas_90": Decimal("0"),
+           "a_favor": Decimal("0")}
 
     for tercero_id, b in buckets.items():
         tercero = db.get(AdmTercero, tercero_id)
-        total = sum(b.values())
+        # Total neto = cuenta por cobrar (antigüedad) − crédito a favor.
+        total = b["corriente"] + b["dias_1_30"] + b["dias_31_60"] + b["dias_61_90"] + b["mas_90"] - b["a_favor"]
         items.append(CxcResumenItem(
             tercero_id=tercero_id,
             tercero_nit=tercero.nit if tercero else None,
             tercero_nombre=tercero.razon_social if tercero else None,
             corriente=b["corriente"], dias_1_30=b["dias_1_30"],
             dias_31_60=b["dias_31_60"], dias_61_90=b["dias_61_90"],
-            mas_90=b["mas_90"], total=total,
+            mas_90=b["mas_90"], a_favor=b["a_favor"], total=total,
         ))
         for k in tot: tot[k] += b[k]
 
     items.sort(key=lambda x: x.mas_90 + x.dias_61_90 + x.dias_31_60, reverse=True)
 
+    total_general = (tot["corriente"] + tot["dias_1_30"] + tot["dias_31_60"]
+                     + tot["dias_61_90"] + tot["mas_90"] - tot["a_favor"])
     return CxcResumenResponse(
         fecha_corte=hoy, items=items,
         total_corriente=tot["corriente"], total_1_30=tot["dias_1_30"],
         total_31_60=tot["dias_31_60"], total_61_90=tot["dias_61_90"],
-        total_mas_90=tot["mas_90"],
-        total_general=sum(tot.values()),
+        total_mas_90=tot["mas_90"], total_a_favor=tot["a_favor"],
+        total_general=total_general,
     )
 
 
@@ -1050,7 +1378,7 @@ def resumen_excel(db: Session, fecha_corte_str: str | None = None):
     ws["A1"].font = title_font
 
     # Encabezados
-    headers = ["NIT", "Cliente", "Corriente", "1 – 30 días", "31 – 60 días", "61 – 90 días", "+ 90 días", "Total"]
+    headers = ["NIT", "Cliente", "Corriente", "1 – 30 días", "31 – 60 días", "61 – 90 días", "+ 90 días", "A favor", "Total"]
     for col, h in enumerate(headers, 1):
         cell = ws.cell(row=3, column=col, value=h)
         cell.font = header_font
@@ -1067,6 +1395,7 @@ def resumen_excel(db: Session, fecha_corte_str: str | None = None):
             float(item.dias_31_60),
             float(item.dias_61_90),
             float(item.mas_90),
+            -float(item.a_favor),
             float(item.total),
         ]
         for col, val in enumerate(vals, 1):
@@ -1082,7 +1411,7 @@ def resumen_excel(db: Session, fecha_corte_str: str | None = None):
         "TOTAL", "",
         float(data.total_corriente), float(data.total_1_30),
         float(data.total_31_60), float(data.total_61_90),
-        float(data.total_mas_90), float(data.total_general),
+        float(data.total_mas_90), -float(data.total_a_favor), float(data.total_general),
     ]
     fill = PatternFill(fill_type="solid", fgColor="EEEEEE")
     for col, val in enumerate(totals, 1):

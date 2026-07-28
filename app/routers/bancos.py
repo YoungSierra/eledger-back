@@ -9,6 +9,7 @@ from app.schemas.bancos import (
     BancoCreate, BancoUpdate, BancoResponse,
     CuentaBancariaCreate, CuentaBancariaUpdate, CuentaBancariaResponse,
     ChequerapCreate, ChequeraUpdate, ChequeraResponse,
+    MovimientosBancoResponse,
 )
 from app.services import bancos_service
 
@@ -67,6 +68,28 @@ def actualizar_cuenta(
     actor: UsuarioActual = Depends(get_current_user),
 ):
     return bancos_service.actualizar_cuenta(db, id, body, actor)
+
+
+@router.get("/cuentas/{id}/movimientos", response_model=MovimientosBancoResponse)
+def movimientos_cuenta(
+    id: uuid.UUID,
+    fecha_desde: str | None = Query(None),
+    fecha_hasta: str | None = Query(None),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return bancos_service.movimientos_cuenta(db, id, fecha_desde, fecha_hasta)
+
+
+@router.get("/cuentas/{id}/movimientos/excel")
+def movimientos_excel(
+    id: uuid.UUID,
+    fecha_desde: str | None = Query(None),
+    fecha_hasta: str | None = Query(None),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return bancos_service.movimientos_excel(db, id, fecha_desde, fecha_hasta)
 
 
 @router.get("/chequeras", response_model=list[ChequeraResponse])

@@ -88,16 +88,27 @@ class CxpDocumentoCreate(BaseModel):
     moneda_id: uuid.UUID
     trm: Optional[Decimal] = None
     descripcion: Optional[str] = None
-    lineas: list[CxpLineaCreate]
+    lineas: list[CxpLineaCreate] = []
+    factura_afectada_id: Optional[uuid.UUID] = None
+    ban_cuenta_id: Optional[uuid.UUID] = None
+    valor: Optional[Decimal] = None   # ANTICIPO: monto pagado por adelantado
 
     @model_validator(mode="after")
     def validar(self) -> "CxpDocumentoCreate":
+        if self.tipo == "ANTICIPO":
+            if not self.ban_cuenta_id:
+                raise ValueError("El anticipo requiere cuenta bancaria")
+            if not self.valor or self.valor <= 0:
+                raise ValueError("El anticipo requiere un valor mayor que cero")
+        else:
+            if not self.lineas:
+                raise ValueError("El documento debe tener al menos una línea")
+        if self.tipo in ("NOTA_CREDITO", "NOTA_DEBITO") and not self.factura_afectada_id:
+            raise ValueError("La nota debe referenciar la factura afectada")
         if self.tipo in ("FACTURA", "NOTA_DEBITO") and not self.fecha_vencimiento:
             raise ValueError("La fecha de vencimiento es obligatoria para FACTURA y NOTA_DEBITO")
         if self.fecha_vencimiento and self.fecha_vencimiento < self.fecha:
             raise ValueError("La fecha de vencimiento no puede ser anterior a la fecha del documento")
-        if not self.lineas:
-            raise ValueError("El documento debe tener al menos una línea")
         return self
 
 
@@ -111,6 +122,9 @@ class CxpDocumentoUpdate(BaseModel):
     trm: Optional[Decimal] = None
     descripcion: Optional[str] = None
     lineas: Optional[list[CxpLineaCreate]] = None
+    factura_afectada_id: Optional[uuid.UUID] = None
+    ban_cuenta_id: Optional[uuid.UUID] = None
+    valor: Optional[Decimal] = None
 
 
 class ComprobanteAplicacionItem(BaseModel):
@@ -125,6 +139,18 @@ class ComprobanteAplicacionItem(BaseModel):
         return v
 
 
+class ComprobanteAnticipoItem(BaseModel):
+    anticipo_id: uuid.UUID
+    valor: Decimal
+
+    @field_validator("valor")
+    @classmethod
+    def valor_positivo(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("El valor del anticipo a aplicar debe ser mayor que cero")
+        return v
+
+
 class ComprobanteCreate(BaseModel):
     fecha: date
     tercero_id: uuid.UUID
@@ -134,23 +160,27 @@ class ComprobanteCreate(BaseModel):
     valor_pagado: Decimal
     descripcion: Optional[str] = None
     aplicaciones: list[ComprobanteAplicacionItem]
+    anticipos: list[ComprobanteAnticipoItem] = []   # anticipos al proveedor usados como fuente
 
     @field_validator("valor_pagado")
     @classmethod
-    def vp_positivo(cls, v: Decimal) -> Decimal:
-        if v <= 0:
-            raise ValueError("El valor pagado debe ser mayor que cero")
+    def vp_no_negativo(cls, v: Decimal) -> Decimal:
+        if v < 0:
+            raise ValueError("El valor pagado no puede ser negativo")
         return v
 
     @model_validator(mode="after")
     def validar(self) -> "ComprobanteCreate":
         if not self.aplicaciones:
             raise ValueError("El comprobante debe tener al menos una factura aplicada")
+        total_anticipos = sum(a.valor for a in self.anticipos)
+        if self.valor_pagado + total_anticipos <= 0:
+            raise ValueError("El comprobante debe tener efectivo pagado o al menos un anticipo aplicado")
         total_aplicado = sum(a.valor for a in self.aplicaciones)
-        if abs(total_aplicado - self.valor_pagado) > Decimal("0.01"):
-            raise ValueError(
-                f"La suma de aplicaciones ({total_aplicado}) debe igualar el valor pagado ({self.valor_pagado})"
-            )
+        if total_aplicado <= 0:
+            raise ValueError("El total aplicado a facturas debe ser mayor que cero")
+        # La diferencia entre lo aplicado y (efectivo + anticipos) se registra como
+        # descuento (aplicado > pagado) o aprovechamiento (pagado > aplicado).
         return self
 
 
@@ -216,6 +246,8 @@ class CxpDocumentoResponse(BaseModel):
     asiento_id: Optional[uuid.UUID] = None
     asiento_modificado_manual: bool
     documento_origen_id: Optional[uuid.UUID] = None
+    factura_afectada_id: Optional[uuid.UUID] = None
+    factura_afectada_numero: Optional[str] = None
     lineas: list[CxpLineaResponse] = []
     creado_en: datetime
     creado_por: uuid.UUID
@@ -236,7 +268,60 @@ class CxpDocumentoListItem(BaseModel):
     saldo: Decimal
     estado: EstadoDoc
     dias_vencimiento: Optional[int] = None
+    factura_afectada_numero: Optional[str] = None
     model_config = {"from_attributes": True}
+
+
+class AnticipoDisponibleCxpItem(BaseModel):
+    id: uuid.UUID
+    numero: str
+    fecha: date
+    total: Decimal
+    saldo: Decimal
+    model_config = {"from_attributes": True}
+
+
+class AnticipoAplicadoCxpItem(BaseModel):
+    anticipo_id: uuid.UUID
+    numero: str
+    fecha: date
+    valor: Decimal
+
+
+class NotaRelacionadaCxpItem(BaseModel):
+    id: uuid.UUID
+    numero: str
+    tipo: str
+    fecha: date
+    total: Decimal
+    saldo: Decimal
+    estado: str
+    model_config = {"from_attributes": True}
+
+
+class CruceCxpItem(BaseModel):
+    id: uuid.UUID
+    documento_id: uuid.UUID
+    numero: str
+    tipo: str
+    fecha: date
+    valor: Decimal
+    estado: str
+    model_config = {"from_attributes": True}
+
+
+class AplicarCxpRequest(BaseModel):
+    documento_credito_id: uuid.UUID   # anticipo / nota que abona
+    documento_debito_id: uuid.UUID    # factura a saldar
+    valor: Decimal
+    fecha: date
+
+    @field_validator("valor")
+    @classmethod
+    def valor_positivo(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("El valor a aplicar debe ser mayor que cero")
+        return v
 
 
 class CxpListResponse(BaseModel):
@@ -255,6 +340,7 @@ class CxpResumenItem(BaseModel):
     dias_31_60: Decimal
     dias_61_90: Decimal
     mas_90: Decimal
+    a_favor: Decimal = Decimal("0")
     total: Decimal
 
 
@@ -266,6 +352,7 @@ class CxpResumenResponse(BaseModel):
     total_31_60: Decimal
     total_61_90: Decimal
     total_mas_90: Decimal
+    total_a_favor: Decimal = Decimal("0")
     total_general: Decimal
 
 

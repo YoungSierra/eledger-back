@@ -35,6 +35,12 @@ def obtener_parametros_cxc(db: Session) -> CxcParametroResponse:
         cuenta_iva_display=_display(db, obj.cuenta_iva_id),
         cuenta_valores_terceros_id=obj.cuenta_valores_terceros_id,
         cuenta_valores_terceros_display=_display(db, obj.cuenta_valores_terceros_id),
+        cuenta_anticipos_id=obj.cuenta_anticipos_id,
+        cuenta_anticipos_display=_display(db, obj.cuenta_anticipos_id),
+        cuenta_descuentos_id=obj.cuenta_descuentos_id,
+        cuenta_descuentos_display=_display(db, obj.cuenta_descuentos_id),
+        cuenta_aprovechamientos_id=obj.cuenta_aprovechamientos_id,
+        cuenta_aprovechamientos_display=_display(db, obj.cuenta_aprovechamientos_id),
     )
 
 
@@ -44,7 +50,7 @@ def actualizar_parametros_cxc(
     obj = db.query(CxcParametroContable).first()
     if not obj:
         raise Exception("Parámetros CxC no inicializados")
-    for campo in ("cuenta_clientes_id", "cuenta_ingresos_id", "cuenta_iva_id", "cuenta_valores_terceros_id"):
+    for campo in ("cuenta_clientes_id", "cuenta_ingresos_id", "cuenta_iva_id", "cuenta_valores_terceros_id", "cuenta_anticipos_id", "cuenta_descuentos_id", "cuenta_aprovechamientos_id"):
         val = getattr(data, campo)
         if val is not None:
             setattr(obj, campo, val)
@@ -65,6 +71,12 @@ def obtener_parametros_cxp(db: Session) -> CxpParametroResponse:
         cuenta_proveedores_display=_display(db, obj.cuenta_proveedores_id),
         cuenta_mercancias_recibidas_id=obj.cuenta_mercancias_recibidas_id,
         cuenta_mercancias_recibidas_display=_display(db, obj.cuenta_mercancias_recibidas_id),
+        cuenta_anticipos_id=obj.cuenta_anticipos_id,
+        cuenta_anticipos_display=_display(db, obj.cuenta_anticipos_id),
+        cuenta_descuentos_id=obj.cuenta_descuentos_id,
+        cuenta_descuentos_display=_display(db, obj.cuenta_descuentos_id),
+        cuenta_aprovechamientos_id=obj.cuenta_aprovechamientos_id,
+        cuenta_aprovechamientos_display=_display(db, obj.cuenta_aprovechamientos_id),
     )
 
 
@@ -74,10 +86,11 @@ def actualizar_parametros_cxp(
     obj = db.query(CxpParametroContable).first()
     if not obj:
         raise Exception("Parámetros CxP no inicializados")
-    if data.cuenta_proveedores_id is not None:
-        obj.cuenta_proveedores_id = data.cuenta_proveedores_id
-    if data.cuenta_mercancias_recibidas_id is not None:
-        obj.cuenta_mercancias_recibidas_id = data.cuenta_mercancias_recibidas_id
+    for campo in ("cuenta_proveedores_id", "cuenta_mercancias_recibidas_id",
+                  "cuenta_anticipos_id", "cuenta_descuentos_id", "cuenta_aprovechamientos_id"):
+        val = getattr(data, campo)
+        if val is not None:
+            setattr(obj, campo, val)
     obj.modificado_por = uuid.UUID(actor.id)
     obj.modificado_en = datetime.now(timezone.utc)
     db.commit()

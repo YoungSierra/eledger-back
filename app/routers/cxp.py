@@ -11,7 +11,8 @@ from app.schemas.cxp import (
     CxpDocumentoCreate, CxpDocumentoUpdate, AnularCxpRequest,
     CxpDocumentoResponse, CxpListResponse, CxpResumenResponse,
     ComprobanteCreate, FacturaPendienteCxpItem, AplicacionPendienteCxpItem,
-    VrtListResponse,
+    VrtListResponse, AnticipoDisponibleCxpItem, AnticipoAplicadoCxpItem,
+    NotaRelacionadaCxpItem, CruceCxpItem, AplicarCxpRequest,
 )
 from app.schemas.facturacion import PreviewAsientoResponse
 from app.services import cxp_service
@@ -68,6 +69,52 @@ def facturas_pendientes(
     actor: UsuarioActual = Depends(get_current_user),
 ):
     return cxp_service.facturas_pendientes_cxp(db, tercero_id, excluir_comprobante_id)
+
+
+@router.get("/anticipos-disponibles", response_model=list[AnticipoDisponibleCxpItem])
+def anticipos_disponibles(
+    tercero_id: uuid.UUID = Query(...),
+    excluir_comprobante_id: Optional[uuid.UUID] = Query(None),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxp_service.anticipos_disponibles_cxp(db, tercero_id, excluir_comprobante_id)
+
+
+@router.get("/{id}/anticipos-aplicados", response_model=list[AnticipoAplicadoCxpItem])
+def anticipos_aplicados(
+    id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxp_service.anticipos_aplicados_cxp(db, id)
+
+
+@router.get("/{id}/notas-relacionadas", response_model=list[NotaRelacionadaCxpItem])
+def notas_de_factura(
+    id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxp_service.notas_de_factura_cxp(db, id)
+
+
+@router.get("/{id}/cruces", response_model=list[CruceCxpItem])
+def cruces_de_documento(
+    id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxp_service.cruces_de_documento_cxp(db, id)
+
+
+@router.post("/aplicar", status_code=200)
+def aplicar(
+    body: AplicarCxpRequest,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxp_service.aplicar_cxp(db, body, actor)
 
 
 @router.post("/comprobante", response_model=CxpDocumentoResponse, status_code=201)

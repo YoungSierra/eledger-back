@@ -11,7 +11,8 @@ from app.schemas.auth import UsuarioActual
 from app.schemas.cxc import (
     CxcDocumentoCreate, CxcDocumentoUpdate, AnularRequest, AplicarRequest,
     CxcDocumentoResponse, CxcListResponse, CxcResumenResponse,
-    ReciboCreate, FacturaPendienteItem, AplicacionPendienteItem,
+    ReciboCreate, FacturaPendienteItem, AplicacionPendienteItem, CruceItem,
+    AnticipoDisponibleItem, AnticipoAplicadoItem, NotaRelacionadaItem,
 )
 from app.schemas.facturacion import PreviewAsientoResponse
 from app.services import cxc_service
@@ -56,6 +57,25 @@ def facturas_pendientes(
     return cxc_service.facturas_pendientes(db, tercero_id, excluir_recibo_id)
 
 
+@router.get("/anticipos-disponibles", response_model=list[AnticipoDisponibleItem])
+def anticipos_disponibles(
+    tercero_id: uuid.UUID = Query(...),
+    excluir_recibo_id: uuid.UUID | None = Query(None),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxc_service.anticipos_disponibles(db, tercero_id, excluir_recibo_id)
+
+
+@router.get("/{id}/anticipos-aplicados", response_model=list[AnticipoAplicadoItem])
+def anticipos_aplicados(
+    id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxc_service.anticipos_aplicados(db, id)
+
+
 @router.post("/recibo", response_model=CxcDocumentoResponse, status_code=201)
 def crear_recibo(
     body: ReciboCreate,
@@ -72,6 +92,24 @@ def aplicaciones_pendientes(
     actor: UsuarioActual = Depends(get_current_user),
 ):
     return cxc_service.aplicaciones_pendientes(db, id)
+
+
+@router.get("/{id}/notas-relacionadas", response_model=list[NotaRelacionadaItem])
+def notas_de_factura(
+    id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxc_service.notas_de_factura(db, id)
+
+
+@router.get("/{id}/cruces", response_model=list[CruceItem])
+def cruces_de_documento(
+    id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return cxc_service.cruces_de_documento(db, id)
 
 
 @router.put("/{id}/recibo", response_model=CxcDocumentoResponse)

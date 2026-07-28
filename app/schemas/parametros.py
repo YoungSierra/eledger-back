@@ -10,6 +10,9 @@ class CxcParametroUpdate(BaseModel):
     cuenta_ingresos_id: Optional[uuid.UUID] = None
     cuenta_iva_id: Optional[uuid.UUID] = None
     cuenta_valores_terceros_id: Optional[uuid.UUID] = None
+    cuenta_anticipos_id: Optional[uuid.UUID] = None
+    cuenta_descuentos_id: Optional[uuid.UUID] = None
+    cuenta_aprovechamientos_id: Optional[uuid.UUID] = None
 
 
 class CxcParametroResponse(BaseModel):
@@ -22,11 +25,20 @@ class CxcParametroResponse(BaseModel):
     cuenta_iva_display: Optional[str]
     cuenta_valores_terceros_id: Optional[uuid.UUID]
     cuenta_valores_terceros_display: Optional[str]
+    cuenta_anticipos_id: Optional[uuid.UUID]
+    cuenta_anticipos_display: Optional[str]
+    cuenta_descuentos_id: Optional[uuid.UUID]
+    cuenta_descuentos_display: Optional[str]
+    cuenta_aprovechamientos_id: Optional[uuid.UUID]
+    cuenta_aprovechamientos_display: Optional[str]
 
 
 class CxpParametroUpdate(BaseModel):
     cuenta_proveedores_id: Optional[uuid.UUID] = None
     cuenta_mercancias_recibidas_id: Optional[uuid.UUID] = None
+    cuenta_anticipos_id: Optional[uuid.UUID] = None
+    cuenta_descuentos_id: Optional[uuid.UUID] = None
+    cuenta_aprovechamientos_id: Optional[uuid.UUID] = None
 
 
 class CxpParametroResponse(BaseModel):
@@ -35,3 +47,9 @@ class CxpParametroResponse(BaseModel):
     cuenta_proveedores_display: Optional[str]
     cuenta_mercancias_recibidas_id: Optional[uuid.UUID]
     cuenta_mercancias_recibidas_display: Optional[str]
+    cuenta_anticipos_id: Optional[uuid.UUID]
+    cuenta_anticipos_display: Optional[str]
+    cuenta_descuentos_id: Optional[uuid.UUID]
+    cuenta_descuentos_display: Optional[str]
+    cuenta_aprovechamientos_id: Optional[uuid.UUID]
+    cuenta_aprovechamientos_display: Optional[str]

@@ -52,9 +52,11 @@ class CxcDocumento(Base, AuditMixin):
     origen_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
     documento_origen_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cxc_documento.id"), nullable=True)
     ban_cuenta_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ban_cuenta.id"), nullable=True)
+    factura_afectada_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cxc_documento.id"), nullable=True)
 
     retenciones: Mapped[list["CxcRetencion"]] = relationship("CxcRetencion", back_populates="documento", cascade="all, delete-orphan")
-    documento_origen: Mapped[Optional["CxcDocumento"]] = relationship("CxcDocumento", remote_side="CxcDocumento.id")
+    documento_origen: Mapped[Optional["CxcDocumento"]] = relationship("CxcDocumento", remote_side="CxcDocumento.id", foreign_keys=[documento_origen_id])
+    factura_afectada: Mapped[Optional["CxcDocumento"]] = relationship("CxcDocumento", remote_side="CxcDocumento.id", foreign_keys=[factura_afectada_id])
 
 
 class CxcRetencion(Base):
@@ -83,6 +85,9 @@ class CxcParametroContable(Base):
     cuenta_ingresos_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
     cuenta_iva_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
     cuenta_valores_terceros_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
+    cuenta_anticipos_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
+    cuenta_descuentos_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
+    cuenta_aprovechamientos_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
     modificado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     modificado_por: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
 

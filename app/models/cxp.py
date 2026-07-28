@@ -20,6 +20,9 @@ class CxpParametroContable(Base):
     id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     cuenta_proveedores_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
     cuenta_mercancias_recibidas_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
+    cuenta_anticipos_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
+    cuenta_descuentos_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
+    cuenta_aprovechamientos_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
     modificado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     modificado_por: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
 
@@ -62,12 +65,14 @@ class CxpDocumento(Base, AuditMixin):
     origen_modulo: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     origen_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
     documento_origen_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cxp_documento.id"), nullable=True)
+    factura_afectada_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cxp_documento.id"), nullable=True)
 
     lineas: Mapped[list["CxpDocumentoLinea"]] = relationship(
         "CxpDocumentoLinea", back_populates="documento", cascade="all, delete-orphan",
         order_by="CxpDocumentoLinea.orden",
     )
-    documento_origen: Mapped[Optional["CxpDocumento"]] = relationship("CxpDocumento", remote_side="CxpDocumento.id")
+    documento_origen: Mapped[Optional["CxpDocumento"]] = relationship("CxpDocumento", remote_side="CxpDocumento.id", foreign_keys=[documento_origen_id])
+    factura_afectada: Mapped[Optional["CxpDocumento"]] = relationship("CxpDocumento", remote_side="CxpDocumento.id", foreign_keys=[factura_afectada_id])
 
 
 class CxpDocumentoLinea(Base):

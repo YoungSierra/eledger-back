@@ -42,7 +42,7 @@ EstadoDoc = Literal["borrador", "contabilizado", "anulado"]
 
 class CxcDocumentoCreate(BaseModel):
     tipo: TipoDoc
-    numero: str
+    numero: Optional[str] = None
     fecha: date
     fecha_vencimiento: Optional[date] = None
     tercero_id: uuid.UUID
@@ -55,9 +55,15 @@ class CxcDocumentoCreate(BaseModel):
     retenciones: list[RetencionCreate] = []
     tarifa_iva_id: Optional[uuid.UUID] = None
     condicion_pago_id: Optional[uuid.UUID] = None
+    ban_cuenta_id: Optional[uuid.UUID] = None
+    factura_afectada_id: Optional[uuid.UUID] = None
 
     @model_validator(mode="after")
     def validar(self) -> "CxcDocumentoCreate":
+        if self.tipo == "ANTICIPO" and not self.ban_cuenta_id:
+            raise ValueError("El anticipo requiere cuenta bancaria")
+        if self.tipo in ("NOTA_CREDITO", "NOTA_DEBITO") and not self.factura_afectada_id:
+            raise ValueError("La nota debe referenciar la factura afectada")
         if self.tipo in ("FACTURA", "NOTA_DEBITO") and not self.fecha_vencimiento:
             raise ValueError("La fecha de vencimiento es obligatoria para FACTURA y NOTA_DEBITO")
         if self.fecha_vencimiento and self.fecha_vencimiento < self.fecha:
@@ -80,6 +86,30 @@ class CxcDocumentoUpdate(BaseModel):
     retenciones: Optional[list[RetencionCreate]] = None
     tarifa_iva_id: Optional[uuid.UUID] = None
     condicion_pago_id: Optional[uuid.UUID] = None
+    ban_cuenta_id: Optional[uuid.UUID] = None
+    factura_afectada_id: Optional[uuid.UUID] = None
+
+
+class CruceItem(BaseModel):
+    id: uuid.UUID
+    documento_id: uuid.UUID
+    numero: str
+    tipo: str
+    fecha: date
+    valor: Decimal
+    estado: str
+    model_config = {"from_attributes": True}
+
+
+class NotaRelacionadaItem(BaseModel):
+    id: uuid.UUID
+    numero: str
+    tipo: str
+    fecha: date
+    total: Decimal
+    saldo: Decimal
+    estado: str
+    model_config = {"from_attributes": True}
 
 
 class AnularRequest(BaseModel):
@@ -130,6 +160,8 @@ class CxcDocumentoResponse(BaseModel):
     tarifa_iva_id: Optional[uuid.UUID] = None
     condicion_pago_id: Optional[uuid.UUID] = None
     asiento_id: Optional[uuid.UUID] = None
+    factura_afectada_id: Optional[uuid.UUID] = None
+    factura_afectada_numero: Optional[str] = None
     asiento_modificado_manual: bool
     documento_origen_id: Optional[uuid.UUID] = None
     ban_cuenta_id: Optional[uuid.UUID] = None
@@ -152,6 +184,7 @@ class CxcDocumentoListItem(BaseModel):
     saldo: Decimal
     estado: EstadoDoc
     dias_vencimiento: Optional[int] = None   # negativo = vencida, positivo = por vencer
+    factura_afectada_numero: Optional[str] = None
     model_config = {"from_attributes": True}
 
 
@@ -174,6 +207,18 @@ class ReciboAplicacionItem(BaseModel):
         return v
 
 
+class ReciboAnticipoItem(BaseModel):
+    anticipo_id: uuid.UUID
+    valor: Decimal
+
+    @field_validator("valor")
+    @classmethod
+    def valor_positivo(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("El valor del anticipo a aplicar debe ser mayor que cero")
+        return v
+
+
 class ReciboCreate(BaseModel):
     fecha: date
     tercero_id: uuid.UUID
@@ -184,27 +229,44 @@ class ReciboCreate(BaseModel):
     descripcion: Optional[str] = None
     retenciones: list[RetencionCreate] = []
     aplicaciones: list[ReciboAplicacionItem]
+    anticipos: list[ReciboAnticipoItem] = []   # anticipos del cliente usados como fuente
 
     @field_validator("valor_recibido")
     @classmethod
-    def vr_positivo(cls, v: Decimal) -> Decimal:
-        if v <= 0:
-            raise ValueError("El valor recibido debe ser mayor que cero")
+    def vr_no_negativo(cls, v: Decimal) -> Decimal:
+        if v < 0:
+            raise ValueError("El valor recibido no puede ser negativo")
         return v
 
     @model_validator(mode="after")
     def validar_aplicacion_completa(self) -> "ReciboCreate":
         if not self.aplicaciones:
             raise ValueError("El recibo debe tener al menos una factura aplicada")
-        total_retenciones = sum(r.valor for r in self.retenciones)
+        total_anticipos = sum(a.valor for a in self.anticipos)
+        if self.valor_recibido + total_anticipos <= 0:
+            raise ValueError("El recibo debe tener efectivo recibido o al menos un anticipo aplicado")
         total_aplicado = sum(a.valor for a in self.aplicaciones)
-        esperado = self.valor_recibido + total_retenciones
-        if abs(total_aplicado - esperado) > Decimal("0.01"):
-            raise ValueError(
-                f"La suma de aplicaciones ({total_aplicado}) debe igualar "
-                f"valor recibido + retenciones ({esperado})"
-            )
+        if total_aplicado <= 0:
+            raise ValueError("El total aplicado a facturas debe ser mayor que cero")
+        # La diferencia entre lo aplicado a facturas y (efectivo + retenciones + anticipos)
+        # se registra como descuento (aplicado > fondeo) o aprovechamiento (fondeo > aplicado).
         return self
+
+
+class AnticipoDisponibleItem(BaseModel):
+    id: uuid.UUID
+    numero: str
+    fecha: date
+    total: Decimal
+    saldo: Decimal
+    model_config = {"from_attributes": True}
+
+
+class AnticipoAplicadoItem(BaseModel):
+    anticipo_id: uuid.UUID
+    numero: str
+    fecha: date
+    valor: Decimal
 
 
 class AplicacionPendienteItem(BaseModel):
@@ -240,6 +302,7 @@ class CxcResumenItem(BaseModel):
     dias_31_60: Decimal
     dias_61_90: Decimal
     mas_90: Decimal
+    a_favor: Decimal = Decimal("0")
     total: Decimal
 
 
@@ -251,4 +314,5 @@ class CxcResumenResponse(BaseModel):
     total_31_60: Decimal
     total_61_90: Decimal
     total_mas_90: Decimal
+    total_a_favor: Decimal = Decimal("0")
     total_general: Decimal
