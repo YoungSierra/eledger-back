@@ -36,6 +36,8 @@ class UsuarioResponse(BaseModel):
     telefono: Optional[str] = None
     rol_id: uuid.UUID
     tercero_id: Optional[uuid.UUID] = None
+    tercero_nombre: Optional[str] = None
+    tercero_nit: Optional[str] = None
     es_asesor: bool = False
     ver_solo_propios: bool = False
     activo: bool

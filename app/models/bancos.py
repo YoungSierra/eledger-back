@@ -1,8 +1,9 @@
+from datetime import date
 from decimal import Decimal
 from typing import Any, Optional
 import uuid
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Numeric, SmallInteger, String
+from sqlalchemy import Boolean, CheckConstraint, Date, ForeignKey, Numeric, SmallInteger, String, Text, UniqueConstraint
 from sqlalchemy.dialects import postgresql as pg
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -66,3 +67,27 @@ class BanChequera(Base, AuditMixin):
     activo: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     cuenta: Mapped["BanCuenta"] = relationship("BanCuenta", back_populates="chequeras")
+
+
+class BanTransferencia(Base, AuditMixin):
+    __tablename__ = "ban_transferencia"
+    __table_args__ = (
+        UniqueConstraint("numero", name="uq_ban_transf_numero"),
+        CheckConstraint("estado IN ('borrador','contabilizado','anulado')", name="chk_ban_transf_estado"),
+        CheckConstraint("cuenta_origen_id <> cuenta_destino_id", name="chk_ban_transf_distintas"),
+        CheckConstraint("valor > 0", name="chk_ban_transf_valor"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    numero: Mapped[str] = mapped_column(String(30), nullable=False)
+    fecha: Mapped[date] = mapped_column(Date, nullable=False)
+    periodo_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_periodo.id"), nullable=False)
+    cuenta_origen_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ban_cuenta.id"), nullable=False)
+    cuenta_destino_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ban_cuenta.id"), nullable=False)
+    valor: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    descripcion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    estado: Mapped[str] = mapped_column(String(20), default="borrador", nullable=False)
+    asiento_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_asiento.id"), nullable=True)
+
+    cuenta_origen: Mapped["BanCuenta"] = relationship("BanCuenta", foreign_keys=[cuenta_origen_id])
+    cuenta_destino: Mapped["BanCuenta"] = relationship("BanCuenta", foreign_keys=[cuenta_destino_id])

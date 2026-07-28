@@ -5,22 +5,35 @@ from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
 from app.models.admin import AdmRol, AdmUsuario
+from app.models.adm import AdmTercero
 from app.schemas.auth import UsuarioActual
 from app.schemas.usuarios import UsuarioCreate, UsuarioUpdate
+
+
+def _enrich(db: Session, u: AdmUsuario) -> AdmUsuario:
+    """Adjunta nombre/nit del tercero asociado (para usuarios cliente)."""
+    if u and u.tercero_id:
+        t = db.query(AdmTercero).filter(AdmTercero.id == u.tercero_id).first()
+        u.tercero_nombre = t.razon_social if t else None
+        u.tercero_nit = t.nit if t else None
+    else:
+        u.tercero_nombre = None
+        u.tercero_nit = None
+    return u
 
 
 def listar_usuarios(db: Session, solo_activos: bool = True) -> list[AdmUsuario]:
     q = db.query(AdmUsuario)
     if solo_activos:
         q = q.filter(AdmUsuario.activo == True)
-    return q.order_by(AdmUsuario.nombre, AdmUsuario.apellido).all()
+    return [_enrich(db, u) for u in q.order_by(AdmUsuario.nombre, AdmUsuario.apellido).all()]
 
 
 def obtener_usuario(db: Session, usuario_id: uuid.UUID) -> AdmUsuario:
     u = db.query(AdmUsuario).filter(AdmUsuario.id == usuario_id).first()
     if not u:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
-    return u
+    return _enrich(db, u)
 
 
 def crear_usuario(db: Session, data: UsuarioCreate, actor: UsuarioActual) -> AdmUsuario:
@@ -47,7 +60,7 @@ def crear_usuario(db: Session, data: UsuarioCreate, actor: UsuarioActual) -> Adm
     db.add(usuario)
     db.commit()
     db.refresh(usuario)
-    return usuario
+    return _enrich(db, usuario)
 
 
 def actualizar_usuario(
@@ -84,7 +97,7 @@ def actualizar_usuario(
 
     db.commit()
     db.refresh(u)
-    return u
+    return _enrich(db, u)
 
 
 def desactivar_usuario(db: Session, usuario_id: uuid.UUID, actor: UsuarioActual) -> None:

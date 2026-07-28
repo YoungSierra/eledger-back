@@ -17,6 +17,9 @@ from app.core.deps import get_current_user
 from app.models.admin import AdmUsuario, AdmRol
 from app.models.adm import AdmTercero
 from app.models.ope import OpeOperacion, OpeEvento, OpeHawb, OpeMawb, OpeCotizacion
+from app.models.facturacion import FacFactura
+from app.models.cxc import CxcDocumento
+from app.models.admin import AdmMoneda
 from app.schemas.auth import UsuarioActual
 
 router = APIRouter(prefix="/portal", tags=["Portal cliente"])
@@ -142,6 +145,9 @@ def listar_operaciones(
         cotis = [c for c in op.cotizaciones if c.cliente_id == usuario.tercero_id]
         coti_ids = [c.id for c in cotis]
         cot0 = cotis[0] if cotis else None
+        # Piezas/peso SOLO de las cotizaciones del cliente (la operación puede tener varios clientes)
+        piezas_cli = sum((c.piezas or 0) for c in cotis) or None
+        peso_cli = sum((c.peso_kg or Decimal("0")) for c in cotis) or None
         hawbs_cli = db.query(OpeHawb).filter(
             OpeHawb.operacion_id == op.id, OpeHawb.cotizacion_id.in_(coti_ids)
         ).all() if coti_ids else []
@@ -169,8 +175,8 @@ def listar_operaciones(
             tipo_operacion=cot0.tipo_operacion if cot0 else "",
             ultimo_evento=evento.descripcion if evento else None,
             ultima_fecha=evento.fecha_hora.strftime("%Y-%m-%d %H:%M") if evento else None,
-            piezas=op.piezas,
-            peso_kg=op.peso_kg,
+            piezas=piezas_cli,
+            peso_kg=peso_cli,
             hawbs_count=len(hawbs_cli),
             mawbs_count=mawbs_count,
         ))
@@ -197,6 +203,8 @@ def detalle_operacion(
     cotis = [c for c in op.cotizaciones if c.cliente_id == usuario.tercero_id]
     coti_ids = [c.id for c in cotis]
     cot0 = cotis[0] if cotis else None
+    piezas_cli = sum((c.piezas or 0) for c in cotis) or None
+    peso_cli = sum((c.peso_kg or Decimal("0")) for c in cotis) or None
     hawbs = db.query(OpeHawb).filter(
         OpeHawb.operacion_id == op.id, OpeHawb.cotizacion_id.in_(coti_ids)
     ).all() if coti_ids else []
@@ -221,8 +229,8 @@ def detalle_operacion(
         origen=cot0.origen if cot0 else "",
         destino=cot0.destino if cot0 else "",
         tipo_operacion=cot0.tipo_operacion if cot0 else "",
-        piezas=op.piezas,
-        peso_kg=op.peso_kg,
+        piezas=piezas_cli,
+        peso_kg=peso_cli,
         hawbs=[HawbPortal(
             numero_hawb=h.numero_hawb,
             vuelo=h.vuelo,
@@ -244,3 +252,133 @@ def detalle_operacion(
             notificado_cliente=e.notificado_cliente,
         ) for e in eventos],
     )
+
+
+# ── Facturas / cartera / perfil ──────────────────────────────────────────────
+
+def _saldo_factura(db, fac):
+    """Saldo pendiente de la factura desde el documento CxC generado al contabilizarla."""
+    doc = db.query(CxcDocumento).filter(
+        CxcDocumento.origen_modulo == "fac_factura",
+        CxcDocumento.origen_id == fac.id,
+        CxcDocumento.activo == True,
+    ).first()
+    return doc.saldo if doc else None
+
+
+@router.get("/facturas")
+def portal_facturas(
+    fecha_desde: Optional[str] = None,
+    fecha_hasta: Optional[str] = None,
+    usuario: AdmUsuario = Depends(get_cliente_actual),
+    db: Session = Depends(get_db),
+):
+    q = db.query(FacFactura).filter(
+        FacFactura.cliente_id == usuario.tercero_id, FacFactura.estado != "borrador"
+    )
+    if fecha_desde:
+        q = q.filter(FacFactura.fecha >= fecha_desde)
+    if fecha_hasta:
+        q = q.filter(FacFactura.fecha <= fecha_hasta)
+    facs = q.order_by(FacFactura.fecha.desc(), FacFactura.numero.desc()).all()
+    hoy = date.today()
+    out = []
+    for f in facs:
+        moneda = db.query(AdmMoneda).filter(AdmMoneda.id == f.moneda_id).first()
+        saldo = _saldo_factura(db, f)
+        if f.estado == "anulada":
+            estado_pago = "anulada"
+        elif saldo is not None and saldo <= 0:
+            estado_pago = "pagada"
+        else:
+            estado_pago = "pendiente"
+        dias = (f.fecha_vencimiento - hoy).days if f.fecha_vencimiento else None
+        out.append({
+            "id": str(f.id),
+            "numero": f.numero,
+            "fecha": f.fecha.isoformat(),
+            "fecha_vencimiento": f.fecha_vencimiento.isoformat() if f.fecha_vencimiento else None,
+            "moneda": moneda.codigo if moneda else "",
+            "total": str(f.total),
+            "saldo": str(saldo) if saldo is not None else str(f.total),
+            "estado": f.estado,
+            "estado_pago": estado_pago,
+            "dias_vencimiento": dias,
+        })
+    return out
+
+
+@router.get("/cartera")
+def portal_cartera(usuario: AdmUsuario = Depends(get_cliente_actual), db: Session = Depends(get_db)):
+    docs = db.query(CxcDocumento).filter(
+        CxcDocumento.tercero_id == usuario.tercero_id,
+        CxcDocumento.estado == "contabilizado",
+        CxcDocumento.activo == True,
+        CxcDocumento.saldo > 0,
+    ).all()
+    hoy = date.today()
+    corriente = Decimal("0")
+    vencido = Decimal("0")
+    a_favor = Decimal("0")
+    items = []
+    for d in docs:
+        if d.tipo in ("NOTA_CREDITO", "ANTICIPO"):
+            a_favor += d.saldo
+            continue
+        vence = d.fecha_vencimiento
+        dias = (hoy - vence).days if vence else 0
+        if vence is None or vence >= hoy:
+            corriente += d.saldo
+        else:
+            vencido += d.saldo
+        items.append({
+            "numero": d.numero, "tipo": d.tipo,
+            "fecha": d.fecha.isoformat(),
+            "fecha_vencimiento": vence.isoformat() if vence else None,
+            "total": str(d.total), "saldo": str(d.saldo),
+            "dias_vencimiento": (vence - hoy).days if vence else None,
+        })
+    items.sort(key=lambda x: (x["fecha_vencimiento"] or ""))
+    total = corriente + vencido - a_favor
+    return {
+        "corriente": str(corriente), "vencido": str(vencido),
+        "a_favor": str(a_favor), "total_adeudado": str(total),
+        "items": items,
+    }
+
+
+class PerfilUpdate(BaseModel):
+    telefono: Optional[str] = None
+    direccion: Optional[str] = None
+    ciudad: Optional[str] = None
+    nombre_contacto: Optional[str] = None
+    cargo_contacto: Optional[str] = None
+    telefono_contacto: Optional[str] = None
+    email_contacto: Optional[str] = None
+
+
+@router.get("/perfil")
+def portal_perfil(usuario: AdmUsuario = Depends(get_cliente_actual), db: Session = Depends(get_db)):
+    t = db.query(AdmTercero).filter(AdmTercero.id == usuario.tercero_id).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    return {
+        "razon_social": t.razon_social, "nit": t.nit,
+        "email": t.email, "telefono": t.telefono, "direccion": t.direccion, "ciudad": t.ciudad,
+        "nombre_contacto": t.nombre_contacto, "cargo_contacto": t.cargo_contacto,
+        "telefono_contacto": t.telefono_contacto, "email_contacto": t.email_contacto,
+        "usuario_nombre": f"{usuario.nombre} {usuario.apellido}", "usuario_email": usuario.email,
+    }
+
+
+@router.put("/perfil")
+def portal_perfil_update(body: PerfilUpdate, usuario: AdmUsuario = Depends(get_cliente_actual), db: Session = Depends(get_db)):
+    t = db.query(AdmTercero).filter(AdmTercero.id == usuario.tercero_id).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    for campo in ("telefono", "direccion", "ciudad", "nombre_contacto", "cargo_contacto", "telefono_contacto", "email_contacto"):
+        val = getattr(body, campo)
+        if val is not None:
+            setattr(t, campo, val)
+    db.commit()
+    return portal_perfil(usuario, db)

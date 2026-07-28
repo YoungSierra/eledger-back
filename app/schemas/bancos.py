@@ -7,6 +7,39 @@ from pydantic import BaseModel, Field
 FORMATOS_EXTRACTO = ("OFX", "CSV", "EXCEL")
 
 
+class TransferenciaCreate(BaseModel):
+    fecha: date
+    cuenta_origen_id: uuid.UUID
+    cuenta_destino_id: uuid.UUID
+    valor: Decimal
+    descripcion: Optional[str] = None
+
+
+class TransferenciaResponse(BaseModel):
+    id: uuid.UUID
+    numero: str
+    fecha: date
+    cuenta_origen_id: uuid.UUID
+    cuenta_origen_nombre: Optional[str] = None
+    cuenta_destino_id: uuid.UUID
+    cuenta_destino_nombre: Optional[str] = None
+    valor: Decimal
+    descripcion: Optional[str] = None
+    estado: str
+    asiento_id: Optional[uuid.UUID] = None
+    model_config = {"from_attributes": True}
+
+
+class TransferenciaListItem(BaseModel):
+    id: uuid.UUID
+    numero: str
+    fecha: date
+    cuenta_origen_nombre: Optional[str] = None
+    cuenta_destino_nombre: Optional[str] = None
+    valor: Decimal
+    estado: str
+
+
 class MovimientoBancoItem(BaseModel):
     fecha: date
     asiento_numero: Optional[int] = None

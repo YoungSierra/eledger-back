@@ -10,8 +10,15 @@ from app.schemas.bancos import (
     CuentaBancariaCreate, CuentaBancariaUpdate, CuentaBancariaResponse,
     ChequerapCreate, ChequeraUpdate, ChequeraResponse,
     MovimientosBancoResponse,
+    TransferenciaCreate, TransferenciaResponse, TransferenciaListItem,
 )
-from app.services import bancos_service
+from app.schemas.facturacion import PreviewAsientoResponse
+from app.services import bancos_service, transferencias_service
+from pydantic import BaseModel
+
+
+class _AnularReq(BaseModel):
+    motivo: str = ""
 
 router = APIRouter(prefix="/bancos", tags=["Bancos"])
 
@@ -117,3 +124,61 @@ def actualizar_chequera(
     actor: UsuarioActual = Depends(get_current_user),
 ):
     return bancos_service.actualizar_chequera(db, id, body, actor)
+
+
+# ─── Transferencias entre cuentas ────────────────────────────────────────────
+
+@router.get("/transferencias", response_model=list[TransferenciaListItem])
+def listar_transferencias(
+    fecha_desde: str | None = Query(None),
+    fecha_hasta: str | None = Query(None),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return transferencias_service.listar(db, fecha_desde, fecha_hasta)
+
+
+@router.post("/transferencias", response_model=TransferenciaResponse, status_code=201)
+def crear_transferencia(
+    body: TransferenciaCreate,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return transferencias_service.crear(db, body, actor)
+
+
+@router.get("/transferencias/{id}", response_model=TransferenciaResponse)
+def obtener_transferencia(
+    id: uuid.UUID, db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user),
+):
+    return transferencias_service.obtener(db, id)
+
+
+@router.get("/transferencias/{id}/asiento", response_model=PreviewAsientoResponse)
+def asiento_transferencia(
+    id: uuid.UUID, db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user),
+):
+    return transferencias_service.asiento(db, id)
+
+
+@router.put("/transferencias/{id}", response_model=TransferenciaResponse)
+def actualizar_transferencia(
+    id: uuid.UUID, body: TransferenciaCreate,
+    db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user),
+):
+    return transferencias_service.actualizar(db, id, body, actor)
+
+
+@router.post("/transferencias/{id}/contabilizar", response_model=TransferenciaResponse)
+def contabilizar_transferencia(
+    id: uuid.UUID, db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user),
+):
+    return transferencias_service.contabilizar(db, id, actor)
+
+
+@router.post("/transferencias/{id}/anular", response_model=TransferenciaResponse)
+def anular_transferencia(
+    id: uuid.UUID, body: _AnularReq,
+    db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user),
+):
+    return transferencias_service.anular(db, id, body.motivo, actor)
