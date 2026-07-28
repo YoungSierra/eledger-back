@@ -7,6 +7,29 @@ from pydantic import BaseModel, Field
 FORMATOS_EXTRACTO = ("OFX", "CSV", "EXCEL")
 
 
+class ExtractoCreate(BaseModel):
+    cuenta_id: uuid.UUID
+    fecha_desde: date
+    fecha_hasta: date
+    saldo_final: Decimal = Decimal("0")
+
+
+class ExtractoLineaCreate(BaseModel):
+    fecha: date
+    descripcion: str
+    referencia: Optional[str] = None
+    valor: Decimal
+
+
+class ConciliarRequest(BaseModel):
+    extracto_linea_id: uuid.UUID
+    asiento_linea_id: uuid.UUID
+
+
+class DesconciliarRequest(BaseModel):
+    extracto_linea_id: uuid.UUID
+
+
 class TransferenciaCreate(BaseModel):
     fecha: date
     cuenta_origen_id: uuid.UUID

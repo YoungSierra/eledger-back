@@ -11,9 +11,11 @@ from app.schemas.bancos import (
     ChequerapCreate, ChequeraUpdate, ChequeraResponse,
     MovimientosBancoResponse,
     TransferenciaCreate, TransferenciaResponse, TransferenciaListItem,
+    ExtractoCreate, ExtractoLineaCreate, ConciliarRequest, DesconciliarRequest,
 )
 from app.schemas.facturacion import PreviewAsientoResponse
-from app.services import bancos_service, transferencias_service
+from app.services import bancos_service, transferencias_service, conciliacion_service
+from fastapi import UploadFile, File
 from pydantic import BaseModel
 
 
@@ -182,3 +184,61 @@ def anular_transferencia(
     db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user),
 ):
     return transferencias_service.anular(db, id, body.motivo, actor)
+
+
+# ─── Conciliación bancaria ───────────────────────────────────────────────────
+
+@router.get("/extractos")
+def listar_extractos(cuenta_id: uuid.UUID | None = Query(None), db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user)):
+    return conciliacion_service.listar_extractos(db, cuenta_id)
+
+
+@router.post("/extractos", status_code=201)
+def crear_extracto(body: ExtractoCreate, db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user)):
+    return conciliacion_service.crear_extracto(db, body, actor)
+
+
+@router.get("/extractos/{id}")
+def obtener_extracto(id: uuid.UUID, db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user)):
+    return conciliacion_service.obtener_extracto(db, id)
+
+
+@router.delete("/extractos/{id}")
+def eliminar_extracto(id: uuid.UUID, db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user)):
+    return conciliacion_service.eliminar_extracto(db, id, actor)
+
+
+@router.get("/extractos/{id}/libro")
+def libro_extracto(id: uuid.UUID, db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user)):
+    return conciliacion_service.libro_no_conciliado(db, id)
+
+
+@router.post("/extractos/{id}/lineas")
+def agregar_linea(id: uuid.UUID, body: ExtractoLineaCreate, db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user)):
+    return conciliacion_service.agregar_linea(db, id, body, actor)
+
+
+@router.post("/extractos/{id}/importar")
+async def importar_extracto(id: uuid.UUID, archivo: UploadFile = File(...), db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user)):
+    contenido = await archivo.read()
+    return conciliacion_service.importar_csv(db, id, contenido, actor)
+
+
+@router.delete("/extractos/lineas/{linea_id}")
+def eliminar_linea(linea_id: uuid.UUID, db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user)):
+    return conciliacion_service.eliminar_linea(db, linea_id, actor)
+
+
+@router.post("/extractos/conciliar")
+def conciliar(body: ConciliarRequest, db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user)):
+    return conciliacion_service.conciliar(db, body.extracto_linea_id, body.asiento_linea_id, actor)
+
+
+@router.post("/extractos/desconciliar")
+def desconciliar(body: DesconciliarRequest, db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user)):
+    return conciliacion_service.desconciliar(db, body.extracto_linea_id, actor)
+
+
+@router.post("/extractos/{id}/estado")
+def cambiar_estado_extracto(id: uuid.UUID, body: dict, db: Session = Depends(get_db), actor: UsuarioActual = Depends(get_current_user)):
+    return conciliacion_service.cambiar_estado(db, id, body.get("estado"), actor)

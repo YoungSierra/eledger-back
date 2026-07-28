@@ -1,9 +1,9 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Optional
 import uuid
 
-from sqlalchemy import Boolean, CheckConstraint, Date, ForeignKey, Numeric, SmallInteger, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Numeric, SmallInteger, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects import postgresql as pg
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -91,3 +91,39 @@ class BanTransferencia(Base, AuditMixin):
 
     cuenta_origen: Mapped["BanCuenta"] = relationship("BanCuenta", foreign_keys=[cuenta_origen_id])
     cuenta_destino: Mapped["BanCuenta"] = relationship("BanCuenta", foreign_keys=[cuenta_destino_id])
+
+
+class BanExtracto(Base, AuditMixin):
+    """Extracto bancario cargado para conciliar contra el libro de la cuenta."""
+    __tablename__ = "ban_extracto"
+
+    id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    cuenta_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ban_cuenta.id"), nullable=False)
+    fecha_desde: Mapped[date] = mapped_column(Date, nullable=False)
+    fecha_hasta: Mapped[date] = mapped_column(Date, nullable=False)
+    saldo_final: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0"), nullable=False)
+    estado: Mapped[str] = mapped_column(String(20), default="abierta", nullable=False)  # abierta | cerrada
+
+    cuenta: Mapped["BanCuenta"] = relationship("BanCuenta", foreign_keys=[cuenta_id])
+    lineas: Mapped[list["BanExtractoLinea"]] = relationship(
+        "BanExtractoLinea", back_populates="extracto", cascade="all, delete-orphan",
+        order_by="BanExtractoLinea.fecha",
+    )
+
+
+class BanExtractoLinea(Base):
+    __tablename__ = "ban_extracto_linea"
+
+    id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    extracto_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ban_extracto.id", ondelete="CASCADE"), nullable=False)
+    fecha: Mapped[date] = mapped_column(Date, nullable=False)
+    descripcion: Mapped[str] = mapped_column(String(300), nullable=False)
+    referencia: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    # valor con signo desde la perspectiva de la cuenta: + entra (crédito banco), − sale (débito banco)
+    valor: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    conciliado: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    asiento_linea_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_asiento_linea.id"), nullable=True)
+    conciliado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    conciliado_por: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
+
+    extracto: Mapped["BanExtracto"] = relationship("BanExtracto", back_populates="lineas")
