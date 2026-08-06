@@ -231,14 +231,20 @@ def despachar_remision(db: Session, remision_id: uuid.UUID, actor: UsuarioActual
     if not lineas:
         raise HTTPException(400, "La remisión no tiene líneas")
 
-    periodo = db.get(CntPeriodo, rem.periodo_id)
     fecha = rem.fecha.date() if hasattr(rem.fecha, "date") else rem.fecha
+
+    # El período se resuelve de nuevo AL DESPACHAR, no se reusa el que quedó
+    # guardado al crear el borrador: entre una cosa y otra el mes pudo cerrarse,
+    # y el asiento de costo de ventas terminaba publicándose contra un período
+    # cerrado. `_buscar_periodo_inv` exige que esté abierto.
+    periodo = _buscar_periodo_inv(db, fecha)
+    rem.periodo_id = periodo.id
 
     # Crear inv_movimiento SALIDA_VENTA
     mov = InvMovimiento(
         tipo="SALIDA_VENTA",
         fecha=rem.fecha,
-        periodo_id=rem.periodo_id,
+        periodo_id=periodo.id,
         bodega_id=rem.bodega_id,
         numero=rem.numero,
         descripcion=f"Remisión {rem.numero}",
@@ -303,7 +309,7 @@ def despachar_remision(db: Session, remision_id: uuid.UUID, actor: UsuarioActual
             tipo_documento_id=td.id if td else None,
             documento_numero=rem.numero,
             fecha=fecha,
-            periodo_id=rem.periodo_id,
+            periodo_id=periodo.id,
             descripcion=f"Costo de ventas — {rem.numero}",
             estado="publicado",
             moneda_id=moneda_func.id,
