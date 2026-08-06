@@ -19,8 +19,9 @@ from app.schemas.ope import (
     OpeEventoCreate, OpeEventoResponse,
     OpeDocumentoCreate, OpeDocumentoResponse, OpeDocumentoUpdate,
     OpeConfirmacionResponse, OpeConfirmacionGuardarRequest, OpeAplicarPesoRequest,
+    OpeHojaResponse,
 )
-from app.services import ope_operacion_service, ope_confirmacion_service
+from app.services import ope_operacion_service, ope_confirmacion_service, ope_hoja_service
 
 router = APIRouter(prefix="/operaciones/operaciones", tags=["Operaciones — Carpeta"])
 
@@ -286,6 +287,17 @@ def registrar_evento(
     actor: UsuarioActual = Depends(get_current_user),
 ):
     return ope_operacion_service.registrar_evento(db, operacion_id, body, actor)
+
+
+@router.get("/{operacion_id}/hoja", response_model=OpeHojaResponse)
+def hoja_operacion(
+    operacion_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    """Resumen imprimible de toda la carpeta. Documento INTERNO: lleva costos,
+    proveedores y margen."""
+    return ope_hoja_service.generar_hoja(db, operacion_id)
 
 
 # ---------------------------------------------------------------------------

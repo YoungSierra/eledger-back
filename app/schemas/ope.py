@@ -916,6 +916,108 @@ class OpeConfirmacionGuardarRequest(BaseModel):
     lineas: list[OpeConfirmacionLineaUpdate] = []
 
 
+# ---------------------------------------------------------------------------
+# Hoja de operaciones — resumen imprimible (documento INTERNO: lleva costos)
+# ---------------------------------------------------------------------------
+
+class HojaCotizacion(BaseModel):
+    numero: str
+    cliente_nombre: str
+    moneda: MonedaType
+    trm: Optional[Decimal]
+    # En la moneda de cada línea, convertido a COP para poder sumar entre sí.
+    cotizado_cop: Decimal
+    confirmado_cop: Decimal
+    facturado_cop: Decimal
+    pendiente_cop: Decimal
+    estado_facturacion: str
+    lineas_total: int
+    lineas_confirmadas: int
+    opcionales: int
+
+
+class HojaFactura(BaseModel):
+    numero: str
+    fecha: date
+    cliente_nombre: str
+    moneda: str
+    total: Decimal
+    total_cop: Decimal
+    estado: str
+    dian_estado: Optional[str]
+
+
+class HojaProveedor(BaseModel):
+    proveedor: str
+    conceptos: int
+    costo_cotizado_cop: Decimal
+    costo_confirmado_cop: Decimal
+
+
+class HojaGuia(BaseModel):
+    numero: str
+    referencia: Optional[str] = None   # cliente en HAWB, aerolínea en MAWB
+    vuelo: Optional[str]
+    fecha_vuelo: Optional[date]
+    piezas: Optional[int]
+    peso_kg: Optional[Decimal]
+    estado: str
+
+
+class HojaManifiesto(BaseModel):
+    fecha: date
+    mawb: Optional[str]
+    aerolinea: Optional[str]
+    hawbs: int
+    piezas: Optional[int]
+    peso_kg: Optional[Decimal]
+    estado: str
+
+
+class HojaEvento(BaseModel):
+    fecha_hora: datetime
+    tipo: str
+    descripcion: str
+    hawb_numero: Optional[str] = None
+
+
+class OpeHojaResponse(BaseModel):
+    # Encabezado
+    numero: str
+    estado: EstadoOperacionType
+    fecha_apertura: date
+    aerolinea: Optional[str]
+    ruta: Optional[str]
+    piezas_total: Optional[int]
+    peso_kg_total: Optional[Decimal]
+    clientes: list[str] = []
+
+    # Económico (todo en COP para poder sumarlo entre cotizaciones)
+    cotizaciones: list[HojaCotizacion] = []
+    total_cotizado_cop: Decimal = Decimal("0")
+    total_confirmado_cop: Decimal = Decimal("0")
+    total_facturado_cop: Decimal = Decimal("0")
+    total_pendiente_cop: Decimal = Decimal("0")
+
+    facturas: list[HojaFactura] = []
+
+    proveedores: list[HojaProveedor] = []
+    total_costo_cotizado_cop: Decimal = Decimal("0")
+    total_costo_confirmado_cop: Decimal = Decimal("0")
+    margen_cop: Decimal = Decimal("0")
+    margen_pct: Decimal = Decimal("0")
+
+    # Operativo
+    mawbs: list[HojaGuia] = []
+    hawbs: list[HojaGuia] = []
+    manifiestos: list[HojaManifiesto] = []
+
+    eventos: list[HojaEvento] = []
+    eventos_total: int = 0
+
+    generado_en: datetime
+
+
 class OpeAplicarPesoRequest(BaseModel):
     """Aplica un peso a todas las líneas POR_KG de una cotización de la operación."""
 
