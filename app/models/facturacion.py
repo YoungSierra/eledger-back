@@ -70,6 +70,12 @@ class FacFactura(Base, AuditMixin):
     cufe: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     fecha_dian: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     dian_estado: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # Número fiscal que asigna el PTH cuando él administra la numeración (Factus).
+    numero_dian: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    # Archivo propio del documento electrónico: la DIAN exige conservarlo 5 años y
+    # el PTH solo lo guarda mientras el paquete esté vigente.
+    xml_key: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    pdf_key: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
 
     lineas: Mapped[list["FacFacturaLinea"]] = relationship(
         "FacFacturaLinea", back_populates="factura", cascade="all, delete-orphan",
@@ -169,3 +175,61 @@ class FacConfigElectronica(Base, AuditMixin):
     credenciales: Mapped[dict] = mapped_column(pg.JSONB, nullable=False, default=dict)
     ambiente: Mapped[str] = mapped_column(String(20), nullable=False, default="PRUEBAS")
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class FacDevolucion(Base, AuditMixin):
+    """Devolución en ventas: nota crédito generada a partir de una factura de venta."""
+    __tablename__ = "fac_devolucion"
+    __table_args__ = (
+        UniqueConstraint("numero", name="uq_fac_devolucion_numero"),
+        CheckConstraint("estado IN ('borrador','contabilizado','anulado')", name="chk_fac_devolucion_estado"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    numero: Mapped[str] = mapped_column(String(30), nullable=False)
+    factura_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("fac_factura.id"), nullable=False)
+    fecha: Mapped[date] = mapped_column(Date, nullable=False)
+    motivo: Mapped[str] = mapped_column(String(300), nullable=False)
+    concepto_dian: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)  # código concepto NC (DIAN)
+    periodo_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_periodo.id"), nullable=False)
+    cliente_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=False)
+    moneda_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_moneda.id"), nullable=False)
+    trm: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    subtotal: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0"), nullable=False)
+    total_iva: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0"), nullable=False)
+    total: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0"), nullable=False)
+    descripcion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    estado: Mapped[str] = mapped_column(String(20), default="borrador", nullable=False)
+    asiento_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_asiento.id"), nullable=True)
+    cxc_documento_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cxc_documento.id"), nullable=True)
+    # DIAN (para transmitir después)
+    cune: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    dian_estado: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    lineas: Mapped[list["FacDevolucionLinea"]] = relationship(
+        "FacDevolucionLinea", back_populates="devolucion", cascade="all, delete-orphan",
+        order_by="FacDevolucionLinea.orden",
+    )
+
+
+class FacDevolucionLinea(Base):
+    __tablename__ = "fac_devolucion_linea"
+
+    id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    devolucion_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("fac_devolucion.id", ondelete="CASCADE"), nullable=False)
+    factura_linea_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("fac_factura_linea.id"), nullable=False)
+    orden: Mapped[int] = mapped_column(SmallInteger, default=1, nullable=False)
+    producto_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("inv_producto.id"), nullable=True)
+    descripcion: Mapped[str] = mapped_column(String(300), nullable=False)
+    cantidad: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    precio_unitario: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    subtotal: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    iva_tipo: Mapped[str] = mapped_column(String(20), default="NINGUNO", nullable=False)
+    iva_pct: Mapped[Decimal] = mapped_column(Numeric(8, 4), default=Decimal("0"), nullable=False)
+    total_iva: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0"), nullable=False)
+    total: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    cuenta_devolucion_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
+    cuenta_iva_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=True)
+    centro_costo_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_centro_costo.id"), nullable=True)
+
+    devolucion: Mapped["FacDevolucion"] = relationship("FacDevolucion", back_populates="lineas")

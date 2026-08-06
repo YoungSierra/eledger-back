@@ -16,6 +16,7 @@ from app.core.cifrado import cifrar, descifrar, enmascarar
 from app.models.facturacion import FacConfigElectronica
 from app.schemas.auth import UsuarioActual
 from app.schemas.fac_config_electronica import ConfigElectronicaUpdate
+from app.services.emisores import factus
 
 # Única base verificada de Dataico (probada: responde). La de habilitación /
 # pruebas NO está publicada — la entrega Dataico al onboarding, por eso `base_url`
@@ -36,6 +37,8 @@ def _a_respuesta(cfg: FacConfigElectronica | None) -> dict | None:
         return None
     cred = cfg.credenciales or {}
     token = descifrar(cred.get("auth_token", ""))
+    secret = descifrar(cred.get("client_secret", ""))
+    password = descifrar(cred.get("password", ""))
     return {
         "id": cfg.id,
         "proveedor": cfg.proveedor,
@@ -44,8 +47,18 @@ def _a_respuesta(cfg: FacConfigElectronica | None) -> dict | None:
         "activo": cfg.activo,
         "account_id": cred.get("account_id"),
         "base_url": cred.get("base_url") or "",
+        "test_prefix": cred.get("test_prefix") or "",
+        "test_resolution_number": cred.get("test_resolution_number") or "",
         "auth_token_mascara": enmascarar(token) or None,
         "tiene_token": bool(token),
+        # Factus — los secretos solo salen enmascarados, igual que el token de Dataico.
+        "client_id": cred.get("client_id") or "",
+        "username": cred.get("username") or "",
+        "numbering_range_id": cred.get("numbering_range_id") or "",
+        "client_secret_mascara": enmascarar(secret) or None,
+        "password_mascara": enmascarar(password) or None,
+        "tiene_client_secret": bool(secret),
+        "tiene_password": bool(password),
         "modificado_en": cfg.modificado_en,
     }
 
@@ -60,21 +73,34 @@ def guardar(db: Session, data: ConfigElectronicaUpdate, actor: UsuarioActual) ->
     nuevo = cfg is None
 
     cred_previas = (cfg.credenciales if cfg else None) or {}
-    # auth_token None => el usuario no lo tocó: se conserva el cifrado anterior.
-    if data.auth_token is None:
-        token_cifrado = cred_previas.get("auth_token", "")
-    elif data.auth_token == "":
-        token_cifrado = ""
-    else:
-        token_cifrado = cifrar(data.auth_token)
+
+    def _secreto(nuevo: str | None, clave: str) -> str:
+        """None => el usuario no lo tocó (conservar) · "" => borrar · valor => cifrar."""
+        if nuevo is None:
+            return cred_previas.get(clave, "")
+        return "" if nuevo == "" else cifrar(nuevo)
+
+    token_cifrado = _secreto(data.auth_token, "auth_token")
+    secret_cifrado = _secreto(data.client_secret, "client_secret")
+    password_cifrado = _secreto(data.password, "password")
 
     if data.activo and data.proveedor == "DATAICO" and not token_cifrado:
         raise HTTPException(status_code=400, detail="Dataico requiere el Auth-Token para activar la integración")
+    if data.activo and data.proveedor == "PTH_FACTUS" and not (secret_cifrado and password_cifrado):
+        raise HTTPException(status_code=400, detail="Factus requiere el Client Secret y la contraseña para activar la integración")
 
     credenciales = {
         "account_id": data.account_id or "",
         "auth_token": token_cifrado,
         "base_url": (data.base_url or "").strip(),
+        "test_prefix": (data.test_prefix or "").strip(),
+        "test_resolution_number": (data.test_resolution_number or "").strip(),
+        # Factus
+        "client_id": (data.client_id or "").strip(),
+        "client_secret": secret_cifrado,
+        "username": (data.username or "").strip(),
+        "password": password_cifrado,
+        "numbering_range_id": (data.numbering_range_id or "").strip(),
     }
 
     if nuevo:
@@ -109,6 +135,22 @@ def probar_conexion(db: Session) -> tuple[bool, str]:
     cfg = obtener(db)
     if not cfg:
         return False, "No hay configuración guardada."
+
+    if cfg.proveedor == "PTH_FACTUS":
+        # El adaptador autentica por OAuth2 y lista los rangos de numeración:
+        # así el usuario ve qué ID poner en "Rango de numeración".
+        cred = cfg.credenciales or {}
+        return factus.probar_conexion(
+            {
+                "client_id": cred.get("client_id"),
+                "client_secret": descifrar(cred.get("client_secret", "")),
+                "username": cred.get("username"),
+                "password": descifrar(cred.get("password", "")),
+            },
+            (cred.get("base_url") or "").strip(),
+            cfg.ambiente,
+        )
+
     if cfg.proveedor != "DATAICO":
         return False, f"La prueba de conexión aún no está implementada para {cfg.proveedor}."
 

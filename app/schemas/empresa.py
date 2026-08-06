@@ -10,6 +10,7 @@ class EmpresaUpdate(BaseModel):
     nit: Optional[str] = None
     digito_verif: Optional[str] = None
     direccion: Optional[str] = None
+    municipio_codigo: Optional[str] = None
     ciudad: Optional[str] = None
     departamento: Optional[str] = None
     telefono: Optional[str] = None
@@ -27,6 +28,7 @@ class EmpresaResponse(BaseModel):
     nit: str
     digito_verif: Optional[str] = None
     direccion: Optional[str] = None
+    municipio_codigo: Optional[str] = None
     ciudad: Optional[str] = None
     departamento: Optional[str] = None
     telefono: Optional[str] = None

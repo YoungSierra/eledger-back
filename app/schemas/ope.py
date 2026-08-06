@@ -110,9 +110,13 @@ class OpeConceptoCreate(BaseModel):
     moneda: MonedaType
     cuenta_id: Optional[uuid.UUID] = None
     cuenta_ingreso_id: Optional[uuid.UUID] = None
+    cuenta_devolucion_venta_id: Optional[uuid.UUID] = None
     tarifa_iva_id: Optional[uuid.UUID] = None
     um_id: Optional[uuid.UUID] = None
     es_valor_tercero: bool = False
+    # Retenciones que el cliente practica sobre este concepto. Lista porque
+    # retefuente y reteICA conviven sobre la misma base.
+    retenciones_ids: list[uuid.UUID] = []
 
 
 class OpeConceptoUpdate(BaseModel):
@@ -122,9 +126,12 @@ class OpeConceptoUpdate(BaseModel):
     moneda: Optional[MonedaType] = None
     cuenta_id: Optional[uuid.UUID] = None
     cuenta_ingreso_id: Optional[uuid.UUID] = None
+    cuenta_devolucion_venta_id: Optional[uuid.UUID] = None
     tarifa_iva_id: Optional[uuid.UUID] = None
     um_id: Optional[uuid.UUID] = None
     es_valor_tercero: Optional[bool] = None
+    # None = no se tocan; lista (aunque vacía) = reemplaza las actuales.
+    retenciones_ids: Optional[list[uuid.UUID]] = None
     activo: Optional[bool] = None
 
 
@@ -137,11 +144,15 @@ class OpeConceptoResponse(BaseModel):
     cuenta_id: Optional[uuid.UUID]
     cuenta_ingreso_id: Optional[uuid.UUID] = None
     cuenta_ingreso_nombre: Optional[str] = None
+    cuenta_devolucion_venta_id: Optional[uuid.UUID] = None
+    cuenta_devolucion_venta_nombre: Optional[str] = None
     tarifa_iva_id: Optional[uuid.UUID] = None
     tarifa_iva_nombre: Optional[str] = None
     um_id: Optional[uuid.UUID] = None
     um_codigo: Optional[str] = None
     es_valor_tercero: bool = False
+    retenciones_ids: list[uuid.UUID] = []
+    retenciones_nombres: list[str] = []
     activo: bool
     creado_en: datetime
 
@@ -161,10 +172,12 @@ class OpeCotizacionLineaCreate(BaseModel):
     valor_unitario: Decimal
     costo_unitario: Decimal
     base: Decimal = Decimal("1")
-    minimo: Optional[Decimal] = None
+    minimo: Optional[Decimal] = None          # de venta
+    minimo_costo: Optional[Decimal] = None    # del proveedor
     moneda: MonedaType
     proveedor_id: Optional[uuid.UUID] = None
     valor_tercero: bool = False
+    opcional: bool = False
     condiciones_costo: Optional[str] = None
     notas: Optional[str] = None
 
@@ -175,7 +188,7 @@ class OpeCotizacionLineaCreate(BaseModel):
             raise ValueError("El valor no puede ser negativo")
         return v
 
-    @field_validator("minimo")
+    @field_validator("minimo", "minimo_costo")
     @classmethod
     def minimo_no_negativo(cls, v: Optional[Decimal]) -> Optional[Decimal]:
         if v is not None and v < 0:
@@ -193,9 +206,11 @@ class OpeCotizacionLineaUpdate(BaseModel):
     costo_unitario: Optional[Decimal] = None
     base: Optional[Decimal] = None
     minimo: Optional[Decimal] = None
+    minimo_costo: Optional[Decimal] = None
     moneda: Optional[MonedaType] = None
     proveedor_id: Optional[uuid.UUID] = None
     valor_tercero: Optional[bool] = None
+    opcional: Optional[bool] = None
     condiciones_costo: Optional[str] = None
     notas: Optional[str] = None
 
@@ -212,12 +227,14 @@ class OpeCotizacionLineaResponse(BaseModel):
     costo_unitario: Decimal
     base: Decimal
     minimo: Optional[Decimal]
+    minimo_costo: Optional[Decimal] = None
     total_venta: Decimal
     total_costo: Decimal
     moneda: MonedaType
     proveedor_id: Optional[uuid.UUID]
     proveedor_nombre: Optional[str] = None
     valor_tercero: bool = False
+    opcional: bool = False
     condiciones_costo: Optional[str]
     notas: Optional[str]
 
@@ -378,6 +395,10 @@ class OpeOperacionResponse(BaseModel):
     aerolinea_id: Optional[uuid.UUID]
     piezas: Optional[int]
     peso_kg: Optional[Decimal]
+    # Suma de las cotizaciones de la operación. Con co-loading `piezas`/`peso_kg`
+    # solo tienen lo de la primera cotización — usar estos para mostrar el total.
+    piezas_total: Optional[int] = None
+    peso_kg_total: Optional[Decimal] = None
     activo: bool
     creado_en: datetime
     clientes: list[ClienteResumen] = []
@@ -790,6 +811,21 @@ class OpeAprobarRequest(BaseModel):
     operacion_id: Optional[uuid.UUID] = None
 
 
+class OpeMoverCotizacionRequest(BaseModel):
+    """Reasigna una cotización aprobada a otra operación (o a una nueva)."""
+
+    # None = crear operación nueva; con valor = mover a esa operación ABIERTA.
+    operacion_id: Optional[uuid.UUID] = None
+    motivo: str
+
+    @field_validator("motivo")
+    @classmethod
+    def motivo_no_vacio(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("El motivo es obligatorio")
+        return v.strip()
+
+
 class OpeOperacionCarpetaResponse(BaseModel):
     operacion: OpeOperacionResponse
     cotizaciones: list[OpeCotizacionResponse] = []
@@ -799,3 +835,96 @@ class OpeOperacionCarpetaResponse(BaseModel):
     manifiestos: list[OpeManifiestoResponse] = []
     eventos: list[OpeEventoResponse] = []
     documentos: list[OpeDocumentoResponse] = []
+
+
+# ---------------------------------------------------------------------------
+# Confirmación de la operación sobre lo cotizado
+# ---------------------------------------------------------------------------
+
+class OpeConfirmacionLineaItem(BaseModel):
+    """Una línea cotizada con su estado de confirmación y lo ya facturado."""
+
+    cotizacion_linea_id: uuid.UUID
+    seccion: SeccionType
+    orden: int
+    descripcion: str
+    tipo_calculo: TipoCalculoType
+    moneda: MonedaType
+    opcional: bool
+    valor_tercero: bool
+
+    # Lo cotizado (inmutable, referencia)
+    base_cotizada: Decimal
+    valor_unitario_cotizado: Decimal
+    costo_unitario_cotizado: Decimal
+    minimo: Optional[Decimal]
+    minimo_costo: Optional[Decimal] = None
+    total_venta_cotizado: Decimal
+    total_costo_cotizado: Decimal
+
+    # Lo confirmado por operación
+    confirmado: bool
+    base_confirmada: Decimal
+    valor_unitario_confirmado: Decimal
+    costo_unitario_confirmado: Decimal
+    total_venta_confirmado: Decimal
+    total_costo_confirmado: Decimal
+    confirmado_por_nombre: Optional[str] = None
+    confirmado_en: Optional[datetime] = None
+    notas_confirmacion: Optional[str] = None
+
+    # Una línea con facturación queda congelada
+    facturado: Decimal = Decimal("0")
+    bloqueada: bool = False
+
+
+class OpeConfirmacionCotizacionGrupo(BaseModel):
+    cotizacion_id: uuid.UUID
+    numero: str
+    cliente_nombre: str
+    moneda_mercancia: MonedaType
+    trm: Optional[Decimal]
+    peso_kg: Optional[Decimal]
+    lineas: list[OpeConfirmacionLineaItem] = []
+
+
+class OpeConfirmacionResponse(BaseModel):
+    operacion_id: uuid.UUID
+    numero: str
+    total_lineas: int
+    lineas_confirmadas: int
+    cotizaciones: list[OpeConfirmacionCotizacionGrupo] = []
+
+
+class OpeConfirmacionLineaUpdate(BaseModel):
+    cotizacion_linea_id: uuid.UUID
+    confirmado: bool
+    base_confirmada: Optional[Decimal] = None
+    valor_unitario_confirmado: Optional[Decimal] = None
+    costo_unitario_confirmado: Optional[Decimal] = None
+    notas: Optional[str] = None
+
+    @field_validator("base_confirmada", "valor_unitario_confirmado", "costo_unitario_confirmado")
+    @classmethod
+    def no_negativo(cls, v: Optional[Decimal]) -> Optional[Decimal]:
+        if v is not None and v < 0:
+            raise ValueError("El valor no puede ser negativo")
+        return v
+
+
+class OpeConfirmacionGuardarRequest(BaseModel):
+    lineas: list[OpeConfirmacionLineaUpdate] = []
+
+
+class OpeAplicarPesoRequest(BaseModel):
+    """Aplica un peso a todas las líneas POR_KG de una cotización de la operación."""
+
+    cotizacion_id: uuid.UUID
+    peso_kg: Decimal
+
+    @field_validator("peso_kg")
+    @classmethod
+    def peso_positivo(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("El peso debe ser mayor que cero")
+        return v

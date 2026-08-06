@@ -24,9 +24,10 @@ CONFIGS = [
     ("metodo_valoracion_inventario",    "PROMEDIO","string",  "Método de valoración de inventario: PROMEDIO o PEPS"),
     ("permite_stock_negativo",          "false",   "boolean", "Permite generar movimientos de salida cuando el stock es insuficiente"),
 
-    # Facturación
-    ("dias_validez_cotizacion",         "30",      "integer", "Días de validez por defecto para una cotización de venta"),
+    # Comercial
+    ("dias_validez_cotizacion",         "15",      "integer", "Días de validez por defecto para una cotización de venta"),
     ("factura_requiere_cotizacion",     "false",   "boolean", "Exige que toda factura de venta tenga una cotización aprobada previa"),
+    ("cotizacion_permite_reabrir",      "true",    "boolean", "Permite devolver a borrador una cotización enviada o rechazada"),
 
 ]
 

@@ -51,6 +51,15 @@ def _clientes_de_operacion(db: Session, op: OpeOperacion) -> list[dict]:
 
 def _attach_operacion(db: Session, op: OpeOperacion) -> OpeOperacion:
     op.clientes = _clientes_de_operacion(db, op)
+    # `op.piezas`/`op.peso_kg` se copian de la primera cotización al abrir la
+    # operación y nunca se actualizan al asociar más (co-loading). El total real
+    # se calcula sobre las cotizaciones — atributos nuevos, no se tocan las
+    # columnas mapeadas para no ensuciar la sesión con un UPDATE fantasma.
+    cots = [c for c in op.cotizaciones if c.activo]
+    piezas = [c.piezas for c in cots if c.piezas is not None]
+    pesos = [c.peso_kg for c in cots if c.peso_kg is not None]
+    op.piezas_total = sum(piezas) if piezas else op.piezas
+    op.peso_kg_total = sum(pesos) if pesos else op.peso_kg
     return op
 
 
@@ -160,6 +169,38 @@ def actualizar_operacion(
                 detail=f"No se puede cerrar la operación: hay {' y '.join(pendientes)} en borrador. "
                        "Deben estar emitidos o anulados antes de cerrar.",
             )
+
+        # Cerrar con conceptos sin confirmar dejaría plata sin facturar: lo no
+        # confirmado no es facturable, y una operación cerrada ya no se toca.
+        # Los opcionales no cuentan — no confirmarlos significa que no se ejecutaron.
+        from app.services import ope_confirmacion_service
+        faltan = ope_confirmacion_service.sin_confirmar_obligatorias(db, op.id)
+        if faltan:
+            muestra = "; ".join(faltan[:3])
+            resto = f" y {len(faltan) - 3} más" if len(faltan) > 3 else ""
+            raise HTTPException(
+                status_code=400,
+                detail=f"No se puede cerrar la operación: {len(faltan)} concepto(s) sin confirmar "
+                       f"en el tab Confirmación ({muestra}{resto}). "
+                       "Confírmalos o márcalos como opcionales en la cotización.",
+            )
+
+    # Cancelar con facturas contabilizadas dejaría la operación anulada pero la
+    # plata cobrada: la factura hay que anularla primero, por su propio flujo.
+    if data.estado == "CANCELADA":
+        from app.models.facturacion import FacFactura
+        cot_ids = [c.id for c in op.cotizaciones if c.activo]
+        if cot_ids:
+            contab = db.query(FacFactura).filter(
+                FacFactura.cotizacion_id.in_(cot_ids),
+                FacFactura.estado == "contabilizada",
+            ).count()
+            if contab:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No se puede cancelar la operación: hay {contab} factura(s) contabilizada(s) "
+                           "contra sus cotizaciones. Anúlalas primero.",
+                )
 
     for campo, valor in data.model_dump(exclude_none=True).items():
         setattr(op, campo, valor)

@@ -18,8 +18,9 @@ from app.schemas.ope import (
     OpeAnularRequest,
     OpeEventoCreate, OpeEventoResponse,
     OpeDocumentoCreate, OpeDocumentoResponse, OpeDocumentoUpdate,
+    OpeConfirmacionResponse, OpeConfirmacionGuardarRequest, OpeAplicarPesoRequest,
 )
-from app.services import ope_operacion_service
+from app.services import ope_operacion_service, ope_confirmacion_service
 
 router = APIRouter(prefix="/operaciones/operaciones", tags=["Operaciones — Carpeta"])
 
@@ -285,6 +286,39 @@ def registrar_evento(
     actor: UsuarioActual = Depends(get_current_user),
 ):
     return ope_operacion_service.registrar_evento(db, operacion_id, body, actor)
+
+
+# ---------------------------------------------------------------------------
+# Confirmación de lo cotizado
+# ---------------------------------------------------------------------------
+
+@router.get("/{operacion_id}/confirmacion", response_model=OpeConfirmacionResponse)
+def obtener_confirmacion(
+    operacion_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return ope_confirmacion_service.obtener_confirmacion(db, operacion_id)
+
+
+@router.put("/{operacion_id}/confirmacion", response_model=OpeConfirmacionResponse)
+def guardar_confirmacion(
+    operacion_id: uuid.UUID,
+    body: OpeConfirmacionGuardarRequest,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return ope_confirmacion_service.guardar_confirmacion(db, operacion_id, body, actor)
+
+
+@router.post("/{operacion_id}/confirmacion/aplicar-peso", response_model=OpeConfirmacionResponse)
+def aplicar_peso(
+    operacion_id: uuid.UUID,
+    body: OpeAplicarPesoRequest,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    return ope_confirmacion_service.aplicar_peso(db, operacion_id, body, actor)
 
 
 # ---------------------------------------------------------------------------

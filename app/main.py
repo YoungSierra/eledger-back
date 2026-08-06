@@ -7,7 +7,8 @@ from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
 from app.routers import (
     auth, usuarios, periodos, empresa, roles, menu, cuentas, centros_costo,
-    terceros, ope_catalogo, ope_cotizacion, ope_operacion, trm, portal, maestros, bancos, resoluciones, conceptos, inventario, consecutivos, configuracion, asientos, cxc, cxp, parametros, fac_facturas, fac_config_electronica, reportes, compras, remisiones, requerimientos, adjuntos,
+    municipios,
+    terceros, ope_catalogo, ope_cotizacion, ope_operacion, trm, portal, maestros, bancos, resoluciones, conceptos, inventario, consecutivos, configuracion, asientos, cxc, cxp, parametros, fac_facturas, fac_devoluciones, fac_config_electronica, reportes, compras, remisiones, requerimientos, adjuntos, nomina,
 )
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
@@ -38,6 +39,8 @@ app.include_router(menu.router)
 app.include_router(cuentas.router)
 app.include_router(centros_costo.router)
 app.include_router(terceros.router)
+app.include_router(municipios.router)
+app.include_router(municipios.router_paises)
 app.include_router(ope_catalogo.router)
 app.include_router(ope_cotizacion.router)
 app.include_router(ope_operacion.router)
@@ -57,6 +60,8 @@ app.include_router(cxp.router)
 app.include_router(parametros.router_cxc)
 app.include_router(parametros.router_cxp)
 app.include_router(fac_facturas.router)
+app.include_router(fac_devoluciones.router)
+app.include_router(nomina.router)
 app.include_router(reportes.router)
 app.include_router(compras.router)
 app.include_router(remisiones.router)

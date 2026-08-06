@@ -53,6 +53,37 @@ class AdmTrm(Base):
 
 
 # ---------------------------------------------------------------------------
+# División político-administrativa (DIVIPOLA del DANE)
+# ---------------------------------------------------------------------------
+
+class AdmPais(Base):
+    """Catálogo ISO 3166-1 alpha-2. Estático, se carga por seed.
+
+    La facturación electrónica identifica al adquiriente del exterior con este
+    código de dos letras; el nombre en texto no sirve.
+    """
+    __tablename__ = "adm_pais"
+
+    codigo: Mapped[str] = mapped_column(String(2), primary_key=True)
+    nombre: Mapped[str] = mapped_column(String(100), nullable=False)
+
+
+class AdmMunicipio(Base):
+    """Catálogo DIVIPOLA: 1.122 municipios de Colombia.
+
+    Es un catálogo estático de referencia (no lleva AuditMixin ni soft delete):
+    se carga por seed y solo cambia si el DANE modifica la división política.
+    El `codigo` de 5 dígitos es el que exige la facturación electrónica.
+    """
+    __tablename__ = "adm_municipio"
+
+    codigo: Mapped[str] = mapped_column(String(5), primary_key=True)
+    nombre: Mapped[str] = mapped_column(String(100), nullable=False)
+    depto_codigo: Mapped[str] = mapped_column(String(2), nullable=False, index=True)
+    depto_nombre: Mapped[str] = mapped_column(String(100), nullable=False)
+
+
+# ---------------------------------------------------------------------------
 # Empresa y configuración
 # ---------------------------------------------------------------------------
 
@@ -64,6 +95,9 @@ class AdmEmpresa(Base, AuditMixin):
     nit: Mapped[str] = mapped_column(String(20), unique=True, nullable=False)
     digito_verif: Mapped[Optional[str]] = mapped_column(String(1), nullable=True)
     direccion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # `municipio_codigo` es la fuente de verdad (DIVIPOLA); ciudad/departamento se
+    # mantienen sincronizados desde el catálogo para no romper impresiones y reportes.
+    municipio_codigo: Mapped[Optional[str]] = mapped_column(String(5), ForeignKey("adm_municipio.codigo"), nullable=True)
     ciudad: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     departamento: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     telefono: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)

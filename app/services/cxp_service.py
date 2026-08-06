@@ -5,6 +5,7 @@ from decimal import Decimal
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.moneda import a_funcional, moneda_funcional, trm_corte
 from app.models.admin import AdmConcepto, AdmMoneda, AdmTipoDocumento, AdmConsecutivo
 from app.models.adm import AdmTercero
 from app.models.contabilidad import CntAsiento, CntAsientoLinea, CntCuenta, CntPeriodo

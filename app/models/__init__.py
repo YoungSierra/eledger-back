@@ -43,3 +43,4 @@ from app.models.ope import (
     OpeDocumento,
 )
 from app.models.req import ReqRequerimiento, ReqMensaje
+from app.models.nomina import NomPeriodo, NomEmpleado, NomEvento

@@ -1,7 +1,8 @@
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, UploadFile, File
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -11,10 +12,34 @@ from app.schemas.asientos import (
     AsientoCreate, AsientoUpdate, AsientoCorregirRequest,
     AsientoResponse, AsientoListResponse,
     LineaCreate, LineaUpdate, LineaResponse,
+    ImportarComprobanteResponse,
 )
 from app.services import asientos_service
 
 router = APIRouter(prefix="/asientos", tags=["Asientos contables"])
+
+
+@router.get("/plantilla-comprobante")
+def plantilla_comprobante(
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    data = asientos_service.generar_plantilla_comprobante_excel()
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="plantilla_comprobante.xlsx"'},
+    )
+
+
+@router.post("/importar-comprobante", response_model=ImportarComprobanteResponse)
+async def importar_comprobante(
+    archivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    contenido = await archivo.read()
+    return asientos_service.importar_comprobante(db, contenido)
 
 
 @router.get("", response_model=AsientoListResponse)
@@ -58,6 +83,15 @@ def actualizar(
     actor: UsuarioActual = Depends(get_current_user),
 ):
     return asientos_service.actualizar(db, id, body, actor)
+
+
+@router.delete("/{id}", status_code=204)
+def eliminar(
+    id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    asientos_service.eliminar(db, id, actor)
 
 
 @router.post("/{id}/lineas", response_model=LineaResponse, status_code=201)

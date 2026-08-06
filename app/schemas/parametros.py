@@ -13,6 +13,7 @@ class CxcParametroUpdate(BaseModel):
     cuenta_anticipos_id: Optional[uuid.UUID] = None
     cuenta_descuentos_id: Optional[uuid.UUID] = None
     cuenta_aprovechamientos_id: Optional[uuid.UUID] = None
+    cuenta_devolucion_venta_id: Optional[uuid.UUID] = None
 
 
 class CxcParametroResponse(BaseModel):
@@ -31,6 +32,8 @@ class CxcParametroResponse(BaseModel):
     cuenta_descuentos_display: Optional[str]
     cuenta_aprovechamientos_id: Optional[uuid.UUID]
     cuenta_aprovechamientos_display: Optional[str]
+    cuenta_devolucion_venta_id: Optional[uuid.UUID]
+    cuenta_devolucion_venta_display: Optional[str]
 
 
 class CxpParametroUpdate(BaseModel):

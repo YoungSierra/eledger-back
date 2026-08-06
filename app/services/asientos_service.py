@@ -13,6 +13,7 @@ from app.schemas.asientos import (
     AsientoCreate, AsientoUpdate, AsientoCorregirRequest,
     AsientoResponse, AsientoListItem, AsientoListResponse,
     LineaCreate, LineaUpdate, LineaResponse,
+    ComprobanteLineaPreview, ImportarComprobanteResponse,
 )
 from app.schemas.auth import UsuarioActual
 
@@ -367,6 +368,22 @@ def actualizar_linea(
     return _enriquecer_linea(linea, db)
 
 
+def eliminar(db: Session, id: uuid.UUID, actor: UsuarioActual) -> None:
+    """Descarta un asiento en borrador (soft-delete). Un asiento publicado no se
+    elimina: se corrige con contraasiento."""
+    asiento = db.query(CntAsiento).filter(CntAsiento.id == id, CntAsiento.activo == True).first()
+    if not asiento:
+        raise HTTPException(status_code=404, detail="Asiento no encontrado")
+    if asiento.estado != "borrador":
+        raise HTTPException(status_code=409, detail="Solo se pueden descartar asientos en borrador. Un asiento contabilizado se corrige con contraasiento.")
+    if asiento.documento_origen_id:
+        raise HTTPException(status_code=409, detail="Este asiento proviene de otro módulo; descártalo desde su documento de origen.")
+    asiento.activo = False
+    asiento.modificado_por = uuid.UUID(actor.id)
+    asiento.modificado_en = datetime.now(timezone.utc)
+    db.commit()
+
+
 def eliminar_linea(db: Session, asiento_id: uuid.UUID, linea_id: uuid.UUID, actor: UsuarioActual) -> None:
     asiento = db.get(CntAsiento, asiento_id)
     if not asiento or not asiento.activo:
@@ -562,3 +579,127 @@ def corregir(db: Session, id: uuid.UUID, data: AsientoCorregirRequest, actor: Us
     db.commit()
     db.refresh(asiento)
     return _to_response(asiento, db)
+
+
+# ---------------------------------------------------------------------------
+# Importar comprobante desde Excel (cuenta, tercero, C.Costo, detalle, débito, crédito)
+# ---------------------------------------------------------------------------
+
+_COMP_COLS = [
+    "Cuenta (código)", "Tercero (NIT)", "Centro de costo (código)",
+    "Detalle", "Débito", "Crédito",
+]
+
+
+def generar_plantilla_comprobante_excel() -> bytes:
+    from io import BytesIO
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Comprobante"
+    ws.append(_COMP_COLS)
+    # Filas de ejemplo (un asiento que cuadra)
+    ws.append(["510506", "", "", "Sueldos del período", 5000000, 0])
+    ws.append(["237005", "800197268", "", "Salud por pagar", 0, 200000])
+    ws.append(["238030", "800229739", "", "Pensión por pagar", 0, 200000])
+    ws.append(["236540", "", "", "Retención en la fuente", 0, 100000])
+    ws.append(["250505", "", "", "Salarios por pagar (neto)", 0, 4500000])
+    from io import BytesIO as _B
+    buf = _B()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _num(v) -> Decimal:
+    if v in (None, ""):
+        return Decimal("0")
+    try:
+        return Decimal(str(v))
+    except Exception:
+        return Decimal("0")
+
+
+def importar_comprobante(db: Session, data: bytes) -> ImportarComprobanteResponse:
+    import io
+    from openpyxl import load_workbook
+    try:
+        wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="No se pudo leer el archivo. Debe ser un Excel (.xlsx).")
+    ws = wb.active
+
+    lineas: list[ComprobanteLineaPreview] = []
+    avisos_glob: list[str] = []
+    filas = 0
+    total_d = total_c = Decimal("0")
+
+    for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if row is None or all(v in (None, "") for v in row):
+            continue
+        filas += 1
+        cod = (str(row[0]).strip() if len(row) > 0 and row[0] not in (None, "") else "")
+        nit = (str(row[1]).strip() if len(row) > 1 and row[1] not in (None, "") else "")
+        cc_cod = (str(row[2]).strip() if len(row) > 2 and row[2] not in (None, "") else "")
+        detalle = (str(row[3]).strip() if len(row) > 3 and row[3] not in (None, "") else "")
+        debito = _num(row[4] if len(row) > 4 else None)
+        credito = _num(row[5] if len(row) > 5 else None)
+
+        pv = ComprobanteLineaPreview(
+            cuenta_codigo=cod, debito=debito, credito=credito, descripcion=detalle, avisos=[],
+        )
+
+        # Cuenta
+        if not cod:
+            pv.avisos.append(f"Fila {i}: falta el código de cuenta.")
+        else:
+            cuenta = db.query(CntCuenta).filter(CntCuenta.codigo == cod, CntCuenta.activo == True).first()
+            if not cuenta:
+                pv.avisos.append(f"Fila {i}: la cuenta {cod} no existe.")
+            elif not cuenta.acepta_movimiento:
+                pv.avisos.append(f"Fila {i}: la cuenta {cod} no acepta movimiento (no es auxiliar).")
+            else:
+                pv.cuenta_id = cuenta.id
+                pv.cuenta_display = f"{cuenta.codigo} {cuenta.nombre}"
+                pv.requiere_tercero = cuenta.requiere_tercero
+                pv.requiere_cc = cuenta.requiere_cc
+
+        # Débito / crédito
+        if not ((debito > 0 and credito == 0) or (credito > 0 and debito == 0)):
+            pv.avisos.append(f"Fila {i}: debe tener débito o crédito (uno solo, mayor que cero).")
+
+        # Tercero
+        if nit:
+            terc = db.query(AdmTercero).filter(AdmTercero.nit == nit, AdmTercero.activo == True).first()
+            if not terc:
+                pv.avisos.append(f"Fila {i}: el tercero con NIT {nit} no existe.")
+            else:
+                pv.tercero_id = terc.id
+                pv.tercero_display = f"{terc.nit} — {terc.razon_social}"
+        if pv.cuenta_id and pv.requiere_tercero and not pv.tercero_id:
+            pv.avisos.append(f"Fila {i}: la cuenta {cod} requiere tercero.")
+
+        # Centro de costo
+        if cc_cod:
+            cc = db.query(CntCentroCosto).filter(CntCentroCosto.codigo == cc_cod, CntCentroCosto.activo == True).first()
+            if not cc:
+                pv.avisos.append(f"Fila {i}: el centro de costo {cc_cod} no existe.")
+            else:
+                pv.centro_costo_id = cc.id
+                pv.centro_costo_display = f"{cc.codigo} {cc.nombre}"
+        if pv.cuenta_id and pv.requiere_cc and not pv.centro_costo_id:
+            pv.avisos.append(f"Fila {i}: la cuenta {cod} requiere centro de costo.")
+
+        total_d += debito
+        total_c += credito
+        lineas.append(pv)
+
+    if not lineas:
+        avisos_glob.append("El archivo no tiene filas con datos.")
+    cuadra = total_d > 0 and abs(total_d - total_c) <= Decimal("0.01")
+    if lineas and not cuadra:
+        avisos_glob.append(f"El comprobante no cuadra: débitos {total_d} vs créditos {total_c}.")
+
+    return ImportarComprobanteResponse(
+        lineas=lineas, total_debito=total_d, total_credito=total_c,
+        cuadra=cuadra, filas_leidas=filas, avisos=avisos_glob,
+    )

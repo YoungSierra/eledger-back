@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.core.moneda import a_funcional, moneda_funcional, trm_corte
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.admin import AdmUsuario, AdmRol
@@ -317,25 +318,35 @@ def portal_cartera(usuario: AdmUsuario = Depends(get_cliente_actual), db: Sessio
         CxcDocumento.saldo > 0,
     ).all()
     hoy = date.today()
+    # Los totales se acumulan en moneda funcional: sumar dólares con pesos daría
+    # un número sin significado. Ver `app/core/moneda.py`.
+    func = moneda_funcional(db)
+    moneda_func_id = func.id if func else None
+    tasas = trm_corte(db, hoy)
+    monedas = {m.id: m.codigo for m in db.query(AdmMoneda).all()}
     corriente = Decimal("0")
     vencido = Decimal("0")
     a_favor = Decimal("0")
     items = []
     for d in docs:
+        saldo_func = a_funcional(d, tasas, moneda_func_id, d.saldo)
         if d.tipo in ("NOTA_CREDITO", "ANTICIPO"):
-            a_favor += d.saldo
+            a_favor += saldo_func
             continue
         vence = d.fecha_vencimiento
         dias = (hoy - vence).days if vence else 0
         if vence is None or vence >= hoy:
-            corriente += d.saldo
+            corriente += saldo_func
         else:
-            vencido += d.saldo
+            vencido += saldo_func
         items.append({
             "numero": d.numero, "tipo": d.tipo,
             "fecha": d.fecha.isoformat(),
             "fecha_vencimiento": vence.isoformat() if vence else None,
+            # Cada documento se muestra en SU moneda; los totales van convertidos.
             "total": str(d.total), "saldo": str(d.saldo),
+            "moneda": monedas.get(d.moneda_id),
+            "saldo_funcional": str(saldo_func),
             "dias_vencimiento": (vence - hoy).days if vence else None,
         })
     items.sort(key=lambda x: (x["fecha_vencimiento"] or ""))

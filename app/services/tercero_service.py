@@ -5,6 +5,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.municipios import sincronizar as sincronizar_municipio, sincronizar_pais
 from app.models.adm import AdmTercero
 from app.models.admin import AdmUsuario
 from app.schemas.auth import UsuarioActual
@@ -49,7 +50,18 @@ def obtener_tercero(db: Session, tercero_id: uuid.UUID) -> AdmTercero:
 
 
 def crear_tercero(db: Session, data: TerceroCreate, actor: UsuarioActual) -> AdmTercero:
-    t = AdmTercero(**data.model_dump(), creado_por=uuid.UUID(actor.id))
+    campos = data.model_dump()
+    municipio = campos.pop("municipio_codigo", None)
+    pais = campos.pop("pais_codigo", None)
+    campos.pop("pais", None)  # se deriva del catálogo ISO
+    t = AdmTercero(**campos, creado_por=uuid.UUID(actor.id))
+    # El país se aplica ANTES que el municipio: si es del exterior, limpia el
+    # municipio DIVIPOLA, y el municipio recién llega para los de Colombia.
+    try:
+        sincronizar_pais(db, t, pais)
+        sincronizar_municipio(db, t, municipio)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     db.add(t)
     try:
         db.commit()
@@ -77,8 +89,18 @@ def actualizar_tercero(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Ya existe un tercero con NIT {data.nit}",
             )
-    for campo, valor in data.model_dump(exclude_unset=True).items():
+    campos = data.model_dump(exclude_unset=True)
+    municipio = campos.pop("municipio_codigo", None)
+    pais = campos.pop("pais_codigo", None)
+    if pais is not None:
+        campos.pop("pais", None)  # se deriva del catálogo ISO
+    for campo, valor in campos.items():
         setattr(t, campo, valor)
+    try:
+        sincronizar_pais(db, t, pais)
+        sincronizar_municipio(db, t, municipio)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     t.modificado_por = uuid.UUID(actor.id)
     t.modificado_en = datetime.now(timezone.utc)
     db.commit()

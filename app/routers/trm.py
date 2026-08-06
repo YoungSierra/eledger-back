@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 import urllib.request
 from datetime import date, datetime, timezone
@@ -15,6 +16,8 @@ from app.models.admin import AdmMoneda, AdmOpcion, AdmPermisoOpcion, AdmTrm
 from app.schemas.auth import UsuarioActual
 
 router = APIRouter(prefix="/trm", tags=["TRM"])
+
+logger = logging.getLogger(__name__)
 
 DATOS_GOV_URL = (
     "https://www.datos.gov.co/resource/32sa-8pi3.json"
@@ -45,14 +48,24 @@ def _trm_hoy(db: Session) -> AdmTrm | None:
 
 
 def _fetch_sugerida() -> Decimal | None:
-    try:
-        req = urllib.request.Request(DATOS_GOV_URL, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
+    """TRM oficial publicada en datos.gov.co (fuente Banco de la República).
+
+    Reintenta una vez: la fuente es fiable pero un tropiezo puntual de red dejaba
+    el modal en blanco sin explicación. El fallo se registra en el log en vez de
+    tragarse en silencio, que era lo que impedía diagnosticarlo.
+    """
+    ultimo_error = None
+    for intento in (1, 2):
+        try:
+            req = urllib.request.Request(DATOS_GOV_URL, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode())
             if data and "valor" in data[0]:
                 return Decimal(str(data[0]["valor"]).replace(",", "."))
-    except Exception:
-        pass
+            ultimo_error = "la respuesta no trae el campo 'valor'"
+        except Exception as e:
+            ultimo_error = f"{e.__class__.__name__}: {e}"
+    logger.warning("No se pudo obtener la TRM sugerida (intentos: 2) — %s", ultimo_error)
     return None
 
 

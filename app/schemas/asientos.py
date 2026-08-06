@@ -115,6 +115,31 @@ class AsientoCorregirRequest(BaseModel):
         return v.strip()
 
 
+class ComprobanteLineaPreview(BaseModel):
+    cuenta_id: Optional[uuid.UUID] = None
+    cuenta_codigo: str = ""
+    cuenta_display: str = ""
+    requiere_tercero: bool = False
+    requiere_cc: bool = False
+    tercero_id: Optional[uuid.UUID] = None
+    tercero_display: str = ""
+    centro_costo_id: Optional[uuid.UUID] = None
+    centro_costo_display: str = ""
+    debito: Decimal = Decimal("0")
+    credito: Decimal = Decimal("0")
+    descripcion: str = ""
+    avisos: list[str] = []
+
+
+class ImportarComprobanteResponse(BaseModel):
+    lineas: list[ComprobanteLineaPreview]
+    total_debito: Decimal
+    total_credito: Decimal
+    cuadra: bool
+    filas_leidas: int
+    avisos: list[str] = []
+
+
 class AsientoResponse(BaseModel):
     id: uuid.UUID
     numero: int

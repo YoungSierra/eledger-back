@@ -14,6 +14,7 @@ from app.schemas.ope import (
     OpeCotizacionMargenResponse,
     OpeOperacionResponse,
     OpeAprobarRequest,
+    OpeMoverCotizacionRequest,
 )
 from app.services import ope_cotizacion_service, ope_operacion_service
 
@@ -119,6 +120,21 @@ def aprobar(
     """Aprueba la cotización. Sin operacion_id crea una operación nueva; con
     operacion_id la asocia a una operación ABIERTA existente (consolidación)."""
     return ope_cotizacion_service.aprobar_cotizacion(db, cotizacion_id, actor, body.operacion_id)
+
+
+@router.post("/{cotizacion_id}/mover", response_model=OpeOperacionResponse)
+def mover(
+    cotizacion_id: uuid.UUID,
+    body: OpeMoverCotizacionRequest,
+    db: Session = Depends(get_db),
+    actor: UsuarioActual = Depends(get_current_user),
+):
+    """Reasigna una cotización aprobada a otra operación ABIERTA, o a una nueva
+    si no se envía operacion_id. Para corregir una aprobación sobre la carpeta
+    equivocada."""
+    return ope_cotizacion_service.mover_cotizacion(
+        db, cotizacion_id, body.operacion_id, body.motivo, actor
+    )
 
 
 @router.post("/{cotizacion_id}/rechazar", response_model=OpeCotizacionResponse)

@@ -7,7 +7,7 @@ from sqlalchemy import cast, Date, func
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.adm import AdmTercero
-from app.models.admin import AdmMoneda, AdmTrm, AdmUsuario
+from app.models.admin import AdmConfiguracion, AdmMoneda, AdmTrm, AdmUsuario
 from app.core.auditoria import registrar as audit
 from app.models.ope import OpeCotizacion, OpeCotizacionLinea, OpeOperacion
 from app.schemas.auth import UsuarioActual
@@ -93,6 +93,7 @@ def _calcular_totales_linea(
     moneda_cif: str,
     moneda_linea: str,
     trm: Decimal | None,
+    minimo_costo: Decimal | None = None,
 ) -> tuple[Decimal, Decimal]:
     if tipo_calculo == "PORCENTAJE":
         vm = valor_cif or Decimal("0")
@@ -104,9 +105,12 @@ def _calcular_totales_linea(
         total_v = valor_unitario * base
         total_c = costo_unitario * base
 
+    # Mínimos independientes: el que nos cobra el proveedor no tiene por qué ser
+    # el que le cobramos al cliente. Cada uno aplica a su lado.
     if minimo is not None:
         total_v = max(total_v, minimo)
-        # El mínimo es una condición comercial — solo aplica a la venta, no al costo
+    if minimo_costo is not None:
+        total_c = max(total_c, minimo_costo)
 
     # Porcentajes sobre CIF se elevan al peso entero superior (práctica aduanera Colombia)
     if tipo_calculo == "PORCENTAJE":
@@ -272,7 +276,7 @@ def actualizar_cotizacion(
             tv, tc = _calcular_totales_linea(
                 linea.tipo_calculo, linea.valor_unitario, linea.costo_unitario,
                 linea.base, linea.minimo, c.valor_cif or c.valor_mercancia, c.moneda_mercancia,
-                linea.moneda, c.trm,
+                linea.moneda, c.trm, linea.minimo_costo,
             )
             linea.total_venta = tv
             linea.total_costo = tc
@@ -290,7 +294,7 @@ def _agregar_linea(db: Session, cotizacion: OpeCotizacion, data: OpeCotizacionLi
     tv, tc = _calcular_totales_linea(
         data.tipo_calculo, data.valor_unitario, data.costo_unitario,
         data.base, data.minimo, cotizacion.valor_cif or cotizacion.valor_mercancia,
-        cotizacion.moneda_mercancia, data.moneda, cotizacion.trm,
+        cotizacion.moneda_mercancia, data.moneda, cotizacion.trm, data.minimo_costo,
     )
     linea = OpeCotizacionLinea(
         cotizacion_id=cotizacion.id,
@@ -303,11 +307,13 @@ def _agregar_linea(db: Session, cotizacion: OpeCotizacion, data: OpeCotizacionLi
         costo_unitario=data.costo_unitario,
         base=data.base,
         minimo=data.minimo,
+        minimo_costo=data.minimo_costo,
         total_venta=tv,
         total_costo=tc,
         moneda=data.moneda,
         proveedor_id=data.proveedor_id,
         valor_tercero=data.valor_tercero,
+        opcional=data.opcional,
         condiciones_costo=data.condiciones_costo,
         notas=data.notas,
     )
@@ -349,7 +355,7 @@ def actualizar_linea(
     tv, tc = _calcular_totales_linea(
         linea.tipo_calculo, linea.valor_unitario, linea.costo_unitario,
         linea.base, linea.minimo, c.valor_cif or c.valor_mercancia, c.moneda_mercancia,
-        linea.moneda, c.trm,
+        linea.moneda, c.trm, linea.minimo_costo,
     )
     linea.total_venta = tv
     linea.total_costo = tc
@@ -450,8 +456,40 @@ def aprobar_cotizacion(
     return operacion
 
 
+def _permite_reabrir(db: Session) -> bool:
+    """Lee el parámetro global cotizacion_permite_reabrir."""
+    cfg = (
+        db.query(AdmConfiguracion)
+        .filter(AdmConfiguracion.clave == "cotizacion_permite_reabrir")
+        .first()
+    )
+    # Si la clave no existe todavía, no se bloquea: evita romper instalaciones
+    # que aún no han corrido el seed.
+    return cfg is None or cfg.valor == "true"
+
+
+def dias_validez_cotizacion(db: Session) -> int:
+    """Días de vigencia por defecto de una cotización nueva."""
+    cfg = (
+        db.query(AdmConfiguracion)
+        .filter(AdmConfiguracion.clave == "dias_validez_cotizacion")
+        .first()
+    )
+    try:
+        return int(cfg.valor) if cfg else 15
+    except (TypeError, ValueError):
+        return 15
+
+
 def reabrir_cotizacion(db: Session, cotizacion_id: uuid.UUID, actor: UsuarioActual) -> OpeCotizacion:
     c = obtener_cotizacion(db, cotizacion_id)
+    # El bloqueo va aquí y no solo en el botón: esconder el botón no es control,
+    # el endpoint queda igual de expuesto.
+    if not _permite_reabrir(db):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La reapertura de cotizaciones está deshabilitada en la configuración del sistema.",
+        )
     if c.estado not in ("ENVIADA", "RECHAZADA"):
         raise HTTPException(
             status_code=400,
@@ -468,6 +506,129 @@ def reabrir_cotizacion(db: Session, cotizacion_id: uuid.UUID, actor: UsuarioActu
     db.commit()
     db.refresh(c)
     return c
+
+
+def mover_cotizacion(
+    db: Session, cotizacion_id: uuid.UUID, operacion_id: uuid.UUID | None,
+    motivo: str, actor: UsuarioActual,
+) -> OpeOperacion:
+    """Reasigna una cotización aprobada a otra operación, o a una nueva.
+
+    Para el caso de haberla aprobado sobre la carpeta equivocada. No se mueve si
+    ya hay trabajo hecho encima (confirmación, guía o factura), ni si dejaría la
+    operación de origen sin cotizaciones.
+    """
+    from app.models.facturacion import FacFactura
+    from app.models.ope import OpeConfirmacionLinea, OpeHawb
+
+    c = obtener_cotizacion(db, cotizacion_id)
+    if c.estado != "APROBADA" or not c.operacion_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Solo se puede mover una cotización APROBADA asociada a una operación. Estado: {c.estado}",
+        )
+
+    origen = db.get(OpeOperacion, c.operacion_id)
+    if origen and origen.estado in ("CERRADA", "CANCELADA"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"La operación de origen {origen.numero} está {origen.estado.lower()}: no se puede mover la cotización.",
+        )
+
+    # Operaciones confirmó algo sobre esta cotización: ya hay trabajo encima.
+    lineas_ids = [l.id for l in c.lineas]
+    if lineas_ids:
+        confirmadas = db.query(OpeConfirmacionLinea).filter(
+            OpeConfirmacionLinea.cotizacion_linea_id.in_(lineas_ids),
+            OpeConfirmacionLinea.confirmado == True,
+            OpeConfirmacionLinea.activo == True,
+        ).count()
+        if confirmadas:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No se puede mover: operaciones ya confirmó {confirmadas} concepto(s) de esta cotización.",
+            )
+
+    facturas = db.query(FacFactura).filter(FacFactura.cotizacion_id == c.id).count()
+    if facturas:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No se puede mover: la cotización tiene {facturas} factura(s) asociada(s).",
+        )
+
+    # La HAWB vive en la operación de origen y apunta a esta cotización; moverla
+    # la dejaría huérfana. Las que están en borrador o anuladas no estorban.
+    hawbs = db.query(OpeHawb).filter(
+        OpeHawb.cotizacion_id == c.id, OpeHawb.estado == "EMITIDA"
+    ).count()
+    if hawbs:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No se puede mover: hay {hawbs} HAWB emitida(s) contra esta cotización.",
+        )
+
+    # La operación de origen no puede quedar vacía: primero se asocia la que va a
+    # quedar y después se mueve esta.
+    hermanas = db.query(OpeCotizacion).filter(
+        OpeCotizacion.operacion_id == c.operacion_id,
+        OpeCotizacion.id != c.id,
+        OpeCotizacion.activo == True,
+    ).count()
+    if hermanas == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No se puede mover: es la única cotización de {origen.numero if origen else 'la operación'} "
+                   "y la operación quedaría vacía. Asocia primero otra cotización.",
+        )
+
+    actor_id = uuid.UUID(actor.id)
+    origen_numero = origen.numero if origen else "?"
+
+    if operacion_id:
+        destino = db.query(OpeOperacion).filter(
+            OpeOperacion.id == operacion_id, OpeOperacion.activo == True
+        ).first()
+        if not destino:
+            raise HTTPException(status_code=404, detail="Operación destino no encontrada")
+        if destino.id == c.operacion_id:
+            raise HTTPException(status_code=400, detail="La cotización ya pertenece a esa operación")
+        if destino.estado != "ABIERTA":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Solo se puede mover a una operación ABIERTA. {destino.numero} está {destino.estado.lower()}.",
+            )
+    else:
+        hoy = date.today()
+        destino = OpeOperacion(
+            numero=_generar_numero_operacion(db, hoy),
+            fecha_apertura=hoy,
+            estado="ABIERTA",
+            aerolinea_id=c.aerolinea_id,
+            piezas=c.piezas,
+            peso_kg=c.peso_kg,
+            creado_por=actor_id,
+        )
+        db.add(destino)
+        db.flush()
+
+    # Las filas de confirmación sin confirmar son de la carpeta vieja: se retiran.
+    if lineas_ids:
+        db.query(OpeConfirmacionLinea).filter(
+            OpeConfirmacionLinea.cotizacion_linea_id.in_(lineas_ids),
+            OpeConfirmacionLinea.operacion_id == c.operacion_id,
+        ).update({"activo": False}, synchronize_session=False)
+
+    c.operacion_id = destino.id
+    c.modificado_por = actor_id
+    c.modificado_en = datetime.now(timezone.utc)
+
+    audit(db, "ope_cotizacion", c.id, "UPDATE", actor_id,
+          campo="operacion_id", valor_anterior=origen_numero, valor_nuevo=destino.numero,
+          contexto={"numero": c.numero, "motivo": motivo})
+
+    db.commit()
+    db.refresh(destino)
+    return destino
 
 
 def rechazar_cotizacion(db: Session, cotizacion_id: uuid.UUID, actor: UsuarioActual) -> OpeCotizacion:

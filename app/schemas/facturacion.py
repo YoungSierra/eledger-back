@@ -82,6 +82,13 @@ class LineaFacResponse(BaseModel):
     valor_tercero: bool = False
     proveedor_id: Optional[uuid.UUID] = None
     proveedor_nombre: Optional[str] = None
+    # Equivalente en moneda funcional cuando la factura está en otra moneda.
+    # Lo calcula el backend con el MISMO redondeo del asiento, para que la
+    # impresión y la contabilidad no difieran en centavos. None si no aplica.
+    precio_unitario_func: Optional[Decimal] = None
+    subtotal_func: Optional[Decimal] = None
+    total_iva_func: Optional[Decimal] = None
+    total_func: Optional[Decimal] = None
 
     model_config = {"from_attributes": True}
 
@@ -122,6 +129,10 @@ class PreviewAsientoLinea(BaseModel):
     centro_costo: Optional[str] = None
     debito: Decimal = Decimal("0")
     credito: Decimal = Decimal("0")
+    # Lo que REALMENTE suma en los libros. Solo viene cuando el documento está
+    # en moneda extranjera; si no, coincide con débito/crédito y se omite.
+    debito_funcional: Optional[Decimal] = None
+    credito_funcional: Optional[Decimal] = None
 
 
 class PreviewAsientoResponse(BaseModel):
@@ -132,6 +143,11 @@ class PreviewAsientoResponse(BaseModel):
     moneda_codigo: Optional[str] = None
     avisos: list[str] = []
     asiento_numero: Optional[int] = None
+    # Moneda funcional y totales convertidos (None si el documento ya está en ella).
+    moneda_funcional_codigo: Optional[str] = None
+    trm: Optional[Decimal] = None
+    total_debito_funcional: Optional[Decimal] = None
+    total_credito_funcional: Optional[Decimal] = None
 
 
 class FacturarCotizacionLineaReq(BaseModel):
@@ -184,6 +200,16 @@ class FacFacturaResponse(BaseModel):
     cufe: Optional[str] = None
     fecha_dian: Optional[datetime] = None
     dian_estado: Optional[str] = None
+    numero_dian: Optional[str] = None
+    xml_key: Optional[str] = None
+    pdf_key: Optional[str] = None
+    # Totales en moneda funcional (solo si la factura está en moneda extranjera).
+    moneda_funcional_codigo: Optional[str] = None
+    subtotal_func: Optional[Decimal] = None
+    total_descuentos_func: Optional[Decimal] = None
+    total_iva_func: Optional[Decimal] = None
+    total_retenciones_func: Optional[Decimal] = None
+    total_func: Optional[Decimal] = None
     lineas: list[LineaFacResponse] = []
     retenciones: list[RetencionFacResponse] = []
     creado_en: datetime

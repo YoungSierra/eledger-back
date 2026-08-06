@@ -11,6 +11,7 @@ from app.models.adm import AdmTercero
 from app.models.contabilidad import CntAsiento, CntAsientoLinea, CntCuenta, CntPeriodo
 from app.models.bancos import BanCuenta
 from app.models.cxc import CxcDocumento, CxcRetencion, CxcAplicacion, CxcParametroContable
+from app.core.moneda import a_funcional, trm_corte
 from app.services.asientos_service import _generar_documento_numero
 from app.schemas.auth import UsuarioActual
 from app.schemas.cxc import (
@@ -569,6 +570,12 @@ def actualizar(db: Session, id: uuid.UUID, data: CxcDocumentoUpdate, actor: Usua
     if data.moneda_id is not None:         doc.moneda_id = data.moneda_id
     if data.trm is not None:               doc.trm = data.trm
     if data.descripcion is not None:       doc.descripcion = data.descripcion
+    # Un documento en moneda funcional NO lleva TRM: dejarla guardada hace que
+    # cualquier conversión posterior multiplique pesos por una tasa y dé un
+    # disparate. Se limpia después de aplicar los cambios, porque la moneda
+    # puede haber cambiado en esta misma edición.
+    if doc.moneda_id == _moneda_funcional(db).id:
+        doc.trm = None
     if data.tarifa_iva_id is not None:     doc.tarifa_iva_id = data.tarifa_iva_id
     if data.condicion_pago_id is not None: doc.condicion_pago_id = data.condicion_pago_id
     if data.ban_cuenta_id is not None:     doc.ban_cuenta_id = data.ban_cuenta_id
@@ -811,6 +818,48 @@ def anular(db: Session, id: uuid.UUID, data: AnularRequest, actor: UsuarioActual
     return _to_response(doc, db)
 
 
+def _validar_moneda_cuenta(db: Session, ban_cuenta, moneda_id) -> None:
+    """La moneda del recibo debe ser la de la cuenta bancaria donde entra la plata.
+
+    Sin esta validación se podía registrar un recibo en dólares contra una cuenta
+    en pesos, y el saldo del banco quedaba con importes de otra unidad.
+    Las cuentas sin moneda definida se asumen en moneda funcional.
+    """
+    if not ban_cuenta:
+        return
+    moneda_cuenta_id = ban_cuenta.moneda_id or _moneda_funcional(db).id
+    if moneda_id == moneda_cuenta_id:
+        return
+    m_doc = db.get(AdmMoneda, moneda_id)
+    m_cta = db.get(AdmMoneda, moneda_cuenta_id)
+    raise HTTPException(
+        status_code=400,
+        detail=f"El recibo está en {m_doc.codigo if m_doc else '?'} pero la cuenta "
+               f"'{ban_cuenta.nombre}' es en {m_cta.codigo if m_cta else '?'}. "
+               "Usa una cuenta de la misma moneda o registra el recibo en la moneda de la cuenta.",
+    )
+
+
+def _validar_misma_moneda(db: Session, credito, debito) -> None:
+    """Impide cruzar documentos de monedas distintas.
+
+    PROVISIONAL. El cruce entre monedas exige decidir en qué moneda se captura el
+    abono y a dónde va la diferencia por tipo de cambio — decisión pendiente con
+    el cliente. Hasta entonces se bloquea con un mensaje claro, en vez de dejar
+    que reste dólares contra pesos y descuadre la cartera en silencio.
+    """
+    if credito.moneda_id == debito.moneda_id:
+        return
+    mc = db.get(AdmMoneda, credito.moneda_id)
+    md = db.get(AdmMoneda, debito.moneda_id)
+    raise HTTPException(
+        status_code=409,
+        detail=f"No se puede cruzar {credito.numero} ({mc.codigo if mc else '?'}) contra "
+               f"{debito.numero} ({md.codigo if md else '?'}): son monedas distintas. "
+               "El manejo de la diferencia por tipo de cambio está pendiente de definición.",
+    )
+
+
 def aplicar(db: Session, data: AplicarRequest, actor: UsuarioActual) -> dict:
     credito = db.query(CxcDocumento).filter(CxcDocumento.id == data.documento_credito_id, CxcDocumento.activo == True).first()
     debito = db.query(CxcDocumento).filter(CxcDocumento.id == data.documento_debito_id, CxcDocumento.activo == True).first()
@@ -821,6 +870,7 @@ def aplicar(db: Session, data: AplicarRequest, actor: UsuarioActual) -> dict:
         raise HTTPException(status_code=409, detail="Ambos documentos deben estar contabilizados")
     if credito.tercero_id != debito.tercero_id:
         raise HTTPException(status_code=400, detail="Los documentos deben pertenecer al mismo tercero")
+    _validar_misma_moneda(db, credito, debito)
     if data.valor > credito.saldo:
         raise HTTPException(status_code=400, detail=f"El valor supera el saldo disponible del documento crédito ({credito.saldo})")
     if data.valor > debito.saldo:
@@ -952,6 +1002,7 @@ def actualizar_recibo(db: Session, recibo_id: uuid.UUID, data: ReciboCreate, act
         raise HTTPException(status_code=400, detail="Cuenta bancaria no encontrada")
     if not ban_cuenta.cuenta_contable_id:
         raise HTTPException(status_code=400, detail="La cuenta bancaria no tiene cuenta contable parametrizada")
+    _validar_moneda_cuenta(db, ban_cuenta, data.moneda_id)
 
     total_retenciones = sum(r.valor for r in data.retenciones)
     for ap in data.aplicaciones:
@@ -965,6 +1016,17 @@ def actualizar_recibo(db: Session, recibo_id: uuid.UUID, data: ReciboCreate, act
             raise HTTPException(status_code=400, detail=f"Documento {ap.factura_id} no encontrado")
         if fac.tercero_id != data.tercero_id:
             raise HTTPException(status_code=400, detail=f"La factura {fac.numero} no pertenece al cliente")
+        # El recibo aplica facturas aquí mismo, sin pasar por `aplicar()`: la
+        # guardia de moneda tiene que repetirse o se cuela por este camino.
+        if fac.moneda_id != data.moneda_id:
+            m_fac = db.get(AdmMoneda, fac.moneda_id)
+            m_rec = db.get(AdmMoneda, data.moneda_id)
+            raise HTTPException(
+                status_code=400,
+                detail=f"La factura {fac.numero} está en {m_fac.codigo if m_fac else '?'} y el recibo "
+                       f"en {m_rec.codigo if m_rec else '?'}. El manejo de la diferencia por tipo de "
+                       "cambio está pendiente de definición.",
+            )
         # El saldo disponible de la factura incluye lo que ya tenía pendiente de este recibo
         app_actual = db.query(CxcAplicacion).filter(
             CxcAplicacion.documento_credito_id == recibo_id,
@@ -1193,6 +1255,7 @@ def crear_recibo(db: Session, data: ReciboCreate, actor: UsuarioActual) -> CxcDo
         raise HTTPException(status_code=400, detail="Cuenta bancaria no encontrada")
     if not ban_cuenta.cuenta_contable_id:
         raise HTTPException(status_code=400, detail="La cuenta bancaria no tiene cuenta contable parametrizada")
+    _validar_moneda_cuenta(db, ban_cuenta, data.moneda_id)
 
     # Validar facturas
     total_retenciones = sum(r.valor for r in data.retenciones)
@@ -1207,6 +1270,16 @@ def crear_recibo(db: Session, data: ReciboCreate, actor: UsuarioActual) -> CxcDo
             raise HTTPException(status_code=400, detail=f"Documento {ap.factura_id} no encontrado o no contabilizado")
         if fac.tercero_id != data.tercero_id:
             raise HTTPException(status_code=400, detail=f"La factura {fac.numero} no pertenece al cliente seleccionado")
+        # Misma guardia que en la creación: este camino tampoco pasa por `aplicar()`.
+        if fac.moneda_id != data.moneda_id:
+            m_fac = db.get(AdmMoneda, fac.moneda_id)
+            m_rec = db.get(AdmMoneda, data.moneda_id)
+            raise HTTPException(
+                status_code=400,
+                detail=f"La factura {fac.numero} está en {m_fac.codigo if m_fac else '?'} y el recibo "
+                       f"en {m_rec.codigo if m_rec else '?'}. El manejo de la diferencia por tipo de "
+                       "cambio está pendiente de definición.",
+            )
         pendiente_otros = db.query(func.coalesce(func.sum(CxcAplicacion.valor), Decimal("0"))).filter(
             CxcAplicacion.documento_debito_id == ap.factura_id,
             CxcAplicacion.estado == "pendiente",
@@ -1293,6 +1366,8 @@ def resumen(db: Session, fecha_corte_str: str | None = None) -> CxcResumenRespon
     from collections import defaultdict
 
     hoy = date.fromisoformat(fecha_corte_str) if fecha_corte_str else date.today()
+    moneda_func_id = _moneda_funcional(db).id
+    tasas = trm_corte(db, hoy)
 
     docs = db.query(CxcDocumento).filter(
         CxcDocumento.activo == True,
@@ -1308,19 +1383,21 @@ def resumen(db: Session, fecha_corte_str: str | None = None) -> CxcResumenRespon
 
     for doc in docs:
         b = buckets[doc.tercero_id]
+        # Todo se acumula en moneda funcional; ver `_a_funcional`.
+        saldo = a_funcional(doc, tasas, moneda_func_id, doc.saldo)
         # NC y anticipos son crédito a favor del cliente: van a una columna aparte.
         if doc.tipo in ("NOTA_CREDITO", "ANTICIPO"):
-            b["a_favor"] += doc.saldo
+            b["a_favor"] += saldo
             continue
         # FACTURA / NOTA_DEBITO: cuenta por cobrar, se ubica por antigüedad.
         if doc.fecha_vencimiento is None or doc.fecha_vencimiento >= hoy:
-            b["corriente"] += doc.saldo
+            b["corriente"] += saldo
         else:
             dias = (hoy - doc.fecha_vencimiento).days
-            if dias <= 30:   b["dias_1_30"]  += doc.saldo
-            elif dias <= 60: b["dias_31_60"] += doc.saldo
-            elif dias <= 90: b["dias_61_90"] += doc.saldo
-            else:            b["mas_90"]     += doc.saldo
+            if dias <= 30:   b["dias_1_30"]  += saldo
+            elif dias <= 60: b["dias_31_60"] += saldo
+            elif dias <= 90: b["dias_61_90"] += saldo
+            else:            b["mas_90"]     += saldo
 
     items = []
     tot = {"corriente": Decimal("0"), "dias_1_30": Decimal("0"),

@@ -24,6 +24,9 @@ class TerceroCreate(BaseModel):
     email: Optional[str] = None
     telefono: Optional[str] = None
     direccion: Optional[str] = None
+    municipio_codigo: Optional[str] = None
+    pais_codigo: Optional[str] = None
+    tipo_documento_dian: Optional[str] = None
     ciudad: Optional[str] = None
     departamento: Optional[str] = None
     pais: Optional[str] = None
@@ -55,6 +58,9 @@ class TerceroUpdate(BaseModel):
     email: Optional[str] = None
     telefono: Optional[str] = None
     direccion: Optional[str] = None
+    municipio_codigo: Optional[str] = None
+    pais_codigo: Optional[str] = None
+    tipo_documento_dian: Optional[str] = None
     ciudad: Optional[str] = None
     departamento: Optional[str] = None
     pais: Optional[str] = None
@@ -91,6 +97,9 @@ class TerceroResponse(BaseModel):
     email: Optional[str]
     telefono: Optional[str]
     direccion: Optional[str]
+    municipio_codigo: Optional[str] = None
+    pais_codigo: Optional[str] = None
+    tipo_documento_dian: Optional[str] = None
     ciudad: Optional[str]
     departamento: Optional[str]
     pais: Optional[str]
@@ -115,6 +124,9 @@ class TerceroSummary(BaseModel):
     razon_social: str
     tipo_tercero: TipoTerceroType
     pais: Optional[str]
+    municipio_codigo: Optional[str] = None
+    pais_codigo: Optional[str] = None
+    tipo_documento_dian: Optional[str] = None
     ciudad: Optional[str]
     telefono: Optional[str]
     email: Optional[str]

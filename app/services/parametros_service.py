@@ -41,6 +41,8 @@ def obtener_parametros_cxc(db: Session) -> CxcParametroResponse:
         cuenta_descuentos_display=_display(db, obj.cuenta_descuentos_id),
         cuenta_aprovechamientos_id=obj.cuenta_aprovechamientos_id,
         cuenta_aprovechamientos_display=_display(db, obj.cuenta_aprovechamientos_id),
+        cuenta_devolucion_venta_id=obj.cuenta_devolucion_venta_id,
+        cuenta_devolucion_venta_display=_display(db, obj.cuenta_devolucion_venta_id),
     )
 
 
@@ -50,7 +52,7 @@ def actualizar_parametros_cxc(
     obj = db.query(CxcParametroContable).first()
     if not obj:
         raise Exception("Parámetros CxC no inicializados")
-    for campo in ("cuenta_clientes_id", "cuenta_ingresos_id", "cuenta_iva_id", "cuenta_valores_terceros_id", "cuenta_anticipos_id", "cuenta_descuentos_id", "cuenta_aprovechamientos_id"):
+    for campo in ("cuenta_clientes_id", "cuenta_ingresos_id", "cuenta_iva_id", "cuenta_valores_terceros_id", "cuenta_anticipos_id", "cuenta_descuentos_id", "cuenta_aprovechamientos_id", "cuenta_devolucion_venta_id"):
         val = getattr(data, campo)
         if val is not None:
             setattr(obj, campo, val)
