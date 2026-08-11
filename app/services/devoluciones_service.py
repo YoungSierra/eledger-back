@@ -28,7 +28,9 @@ from app.models.admin import AdmMoneda, AdmTipoDocumento
 from app.models.adm import AdmTercero
 from app.models.contabilidad import CntAsiento, CntAsientoLinea, CntCentroCosto, CntCuenta, CntPeriodo
 from app.models.cxc import CxcDocumento, CxcAplicacion, CxcParametroContable
-from app.models.facturacion import FacFactura, FacFacturaLinea, FacDevolucion, FacDevolucionLinea
+from app.models.facturacion import (
+    FacFactura, FacFacturaLinea, FacDevolucion, FacDevolucionLinea, FacDevolucionRetencion,
+)
 from app.models.inventario import (
     InvProducto, InvProductoUm, InvProductoBodega, InvMovimiento, InvMovimientoLinea,
     InvRemisionLinea,
@@ -288,7 +290,46 @@ def obtener(db: Session, id: uuid.UUID) -> DevolucionResponse:
     return _to_response(db, dev)
 
 
-def _persistir_lineas(db: Session, dev: FacDevolucion, lineas: list[dict], params) -> tuple[Decimal, Decimal, Decimal]:
+def _persistir_retenciones(db: Session, dev: FacDevolucion, factura, subtotal_dev: Decimal) -> Decimal:
+    """Reversa las retenciones de la factura en proporción a lo devuelto.
+
+    La proporción se toma sobre el SUBTOTAL, que es la base sobre la que se
+    calcularon. Devolver el 40% del subtotal reversa el 40% de cada retención.
+
+    La última línea absorbe el redondeo para que la suma cuadre exactamente con
+    la proporción del total: si se reparte por línea, tres redondeos hacia abajo
+    dejan el asiento descuadrado por centavos.
+    """
+    db.query(FacDevolucionRetencion).filter(
+        FacDevolucionRetencion.devolucion_id == dev.id).delete()
+
+    rets = list(factura.retenciones or [])
+    base_factura = Decimal(str(factura.subtotal or 0))
+    if not rets or base_factura <= 0 or subtotal_dev <= 0:
+        return Decimal("0")
+
+    frac = subtotal_dev / base_factura
+    if frac > 1:
+        frac = Decimal("1")
+
+    objetivo = (sum(Decimal(str(r.valor)) for r in rets) * frac).quantize(Q)
+    acumulado = Decimal("0")
+    for i, r in enumerate(rets):
+        if i == len(rets) - 1:
+            valor = objetivo - acumulado
+        else:
+            valor = (Decimal(str(r.valor)) * frac).quantize(Q)
+            acumulado += valor
+        db.add(FacDevolucionRetencion(
+            id=uuid.uuid4(), devolucion_id=dev.id,
+            tipo=r.tipo, concepto=r.concepto,
+            base=(Decimal(str(r.base)) * frac).quantize(Q),
+            porcentaje=r.porcentaje, valor=valor, cuenta_id=r.cuenta_id,
+        ))
+    return objetivo
+
+
+def _persistir_lineas(db: Session, dev: FacDevolucion, lineas: list[dict], params) -> tuple[Decimal, Decimal, Decimal, Decimal]:
     subtotal = total_iva = Decimal("0")
     for l in lineas:
         cta_dev = _resolver_cuenta_devolucion(db, l["_fl"], params)
@@ -303,7 +344,12 @@ def _persistir_lineas(db: Session, dev: FacDevolucion, lineas: list[dict], param
         ))
         subtotal += l["subtotal"]
         total_iva += l["total_iva"]
-    return subtotal, total_iva, (subtotal + total_iva)
+
+    factura = db.get(FacFactura, dev.factura_id)
+    db.flush()   # la devolución debe existir antes de colgarle retenciones
+    total_ret = _persistir_retenciones(db, dev, factura, subtotal) if factura else Decimal("0")
+    # `total` es NETO, igual que en la factura: es lo que se le abona al cliente.
+    return subtotal, total_iva, total_ret, (subtotal + total_iva - total_ret)
 
 
 def crear(db: Session, data: DevolucionCreate, actor: UsuarioActual) -> DevolucionResponse:
@@ -326,8 +372,8 @@ def crear(db: Session, data: DevolucionCreate, actor: UsuarioActual) -> Devoluci
     )
     db.add(dev)
     db.flush()
-    subtotal, total_iva, total = _persistir_lineas(db, dev, lineas, params)
-    dev.subtotal, dev.total_iva, dev.total = subtotal, total_iva, total
+    subtotal, total_iva, total_ret, total = _persistir_lineas(db, dev, lineas, params)
+    dev.subtotal, dev.total_iva, dev.total_retenciones, dev.total = subtotal, total_iva, total_ret, total
     db.commit()
     db.refresh(dev)
     return _to_response(db, dev)
@@ -354,8 +400,8 @@ def actualizar(db: Session, id: uuid.UUID, data: DevolucionUpdate, actor: Usuari
         lineas = _construir_lineas(db, factura, data.lineas, excluir_dev_id=dev.id)
         db.query(FacDevolucionLinea).filter(FacDevolucionLinea.devolucion_id == dev.id).delete()
         db.flush()
-        subtotal, total_iva, total = _persistir_lineas(db, dev, lineas, params)
-        dev.subtotal, dev.total_iva, dev.total = subtotal, total_iva, total
+        subtotal, total_iva, total_ret, total = _persistir_lineas(db, dev, lineas, params)
+        dev.subtotal, dev.total_iva, dev.total_retenciones, dev.total = subtotal, total_iva, total_ret, total
 
     dev.modificado_por = uuid.UUID(actor.id)
     dev.modificado_en = datetime.now(timezone.utc)
@@ -427,7 +473,19 @@ def _lineas_asiento_nc(db: Session, dev: FacDevolucion, params, preview: bool):
                 problema(f"La línea '{l.descripcion}' tiene IVA pero no tiene cuenta IVA.")
             add(cta_iva, l.total_iva, Decimal("0"))
 
-    # Cr Clientes por el total
+    # Cr Retenciones a favor — reversa el débito que hizo la factura, en la
+    # proporción devuelta. Sin esto el saldo de la cuenta queda inflado y no
+    # cuadra con el certificado que el cliente emite al cierre.
+    for r in dev.retenciones:
+        if not r.valor or r.valor <= 0:
+            continue
+        cta_ret = db.get(CntCuenta, r.cuenta_id) if r.cuenta_id else None
+        if not cta_ret:
+            problema(f"La retención '{r.concepto}' no tiene cuenta contable.")
+            continue
+        add(cta_ret, Decimal("0"), r.valor)
+
+    # Cr Clientes por el NETO: `dev.total` ya viene con las retenciones restadas.
     add(cuenta_clientes, Decimal("0"), dev.total)
     return out, avisos
 
@@ -696,7 +754,8 @@ def contabilizar(db: Session, id: uuid.UUID, actor: UsuarioActual) -> Devolucion
         id=uuid.uuid4(), numero=dev.numero, tipo=TIPO_NC,
         fecha=dev.fecha, periodo_id=dev.periodo_id, tercero_id=dev.cliente_id,
         moneda_id=dev.moneda_id, trm=dev.trm,
-        subtotal=dev.subtotal, total_iva=dev.total_iva, total_retenciones=Decimal("0"),
+        subtotal=dev.subtotal, total_iva=dev.total_iva,
+        total_retenciones=dev.total_retenciones,
         total=dev.total, saldo=dev.total,
         descripcion=f"Devolución factura {factura.numero} — {dev.motivo}",
         estado="contabilizado", asiento_id=asiento.id,

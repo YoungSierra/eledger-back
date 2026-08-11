@@ -197,6 +197,9 @@ class FacDevolucion(Base, AuditMixin):
     trm: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
     subtotal: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0"), nullable=False)
     total_iva: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0"), nullable=False)
+    # Se reversan en proporción a lo devuelto. `total` es NETO (subtotal + IVA −
+    # retenciones), igual que en la factura: es lo que se le abona al cliente.
+    total_retenciones: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0"), nullable=False)
     total: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0"), nullable=False)
     descripcion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     estado: Mapped[str] = mapped_column(String(20), default="borrador", nullable=False)
@@ -210,6 +213,35 @@ class FacDevolucion(Base, AuditMixin):
         "FacDevolucionLinea", back_populates="devolucion", cascade="all, delete-orphan",
         order_by="FacDevolucionLinea.orden",
     )
+    retenciones: Mapped[list["FacDevolucionRetencion"]] = relationship(
+        "FacDevolucionRetencion", back_populates="devolucion", cascade="all, delete-orphan",
+    )
+
+
+class FacDevolucionRetencion(Base):
+    """Retenciones que la devolución reversa, prorrateadas sobre las de la factura.
+
+    Se guardan en vez de recalcularse al vuelo porque la nota crédito es un
+    documento fiscal: tiene que poder reimprimirse igual dentro de dos años,
+    aunque la tarifa del concepto haya cambiado.
+    """
+
+    __tablename__ = "fac_devolucion_retencion"
+    __table_args__ = (
+        CheckConstraint("tipo IN ('RETEFUENTE','RETEICA','RETEIVA')", name="chk_fac_dev_ret_tipo"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    devolucion_id: Mapped[uuid.UUID] = mapped_column(
+        pg.UUID(as_uuid=True), ForeignKey("fac_devolucion.id", ondelete="CASCADE"), nullable=False)
+    tipo: Mapped[str] = mapped_column(String(20), nullable=False)
+    concepto: Mapped[str] = mapped_column(String(100), nullable=False)
+    base: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    porcentaje: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    valor: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    cuenta_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("cnt_cuenta.id"), nullable=False)
+
+    devolucion: Mapped["FacDevolucion"] = relationship("FacDevolucion", back_populates="retenciones")
 
 
 class FacDevolucionLinea(Base):
