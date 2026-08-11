@@ -41,6 +41,9 @@ _MONEDAS = "('USD','COP')"
 _ESTADOS_COT = "('BORRADOR','ENVIADA','APROBADA','RECHAZADA','VENCIDA')"
 _ESTADOS_OPE = "('ABIERTA','EN_CURSO','CERRADA','CANCELADA')"
 _ESTADOS_DOC = "('BORRADOR','EMITIDA','ANULADA')"
+_ORIGEN_BL = "('RECIBIDO','EMITIDO')"      # importación recibe, exportación emite
+_TIPO_CARGA = "('FCL','LCL')"
+_PAGO_FLETE = "('PREPAID','COLLECT')"
 _ESTADOS_DOC_OPE = "('PENDIENTE','RECIBIDO','APROBADO')"
 _INCOTERMS = "('EXW','FCA','FAS','FOB','CFR','CIF','CPT','CIP','DAP','DPU','DDP')"
 
@@ -243,6 +246,10 @@ class OpeOperacion(Base, AuditMixin):
     eventos: Mapped[list["OpeEvento"]] = relationship("OpeEvento", back_populates="operacion", cascade="all, delete-orphan")
     documentos: Mapped[list["OpeDocumento"]] = relationship("OpeDocumento", back_populates="operacion", cascade="all, delete-orphan")
     confirmaciones: Mapped[list["OpeConfirmacionLinea"]] = relationship("OpeConfirmacionLinea", back_populates="operacion", cascade="all, delete-orphan")
+    # Marítimo — conviven con los aéreos: una operación puede ser multimodal.
+    mbls: Mapped[list["OpeMbl"]] = relationship("OpeMbl", back_populates="operacion", cascade="all, delete-orphan")
+    hbls: Mapped[list["OpeHbl"]] = relationship("OpeHbl", back_populates="operacion", cascade="all, delete-orphan")
+    contenedores: Mapped[list["OpeContenedor"]] = relationship("OpeContenedor", back_populates="operacion", cascade="all, delete-orphan")
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +484,261 @@ class OpeDocumento(Base):
     creado_por: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), nullable=False)
 
     operacion: Mapped["OpeOperacion"] = relationship("OpeOperacion", back_populates="documentos")
+
+
+# ---------------------------------------------------------------------------
+# Documentos de transporte marítimo
+#
+# Calca la jerarquía del aéreo (MAWB→HAWB) pero los datos no se parecen, por eso
+# van en tablas propias: contenedor, CBM, tara y puertos no caben en ope_hawb.
+# Naviera y puertos salen de ope_aerolinea/ope_aeropuerto con modalidad
+# MARITIMA — esos catálogos ya nacieron multimodales.
+# ---------------------------------------------------------------------------
+
+class OpeMbl(Base, AuditMixin):
+    """Bill of Lading maestro. Lo emite la naviera; Universal Cargo lo recibe."""
+
+    __tablename__ = "ope_mbl"
+    __table_args__ = (
+        CheckConstraint(f"tipo_carga IN {_TIPO_CARGA}", name="chk_mbl_tipo_carga"),
+        CheckConstraint(f"tipo_pago_flete IN {_PAGO_FLETE}", name="chk_mbl_pago_flete"),
+        Index("idx_mbl_operacion", "operacion_id"),
+        Index("idx_mbl_numero", "numero_bl"),
+        Index("idx_mbl_booking", "booking_no"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    operacion_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_operacion.id"), nullable=False)
+    naviera_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_aerolinea.id"), nullable=True)
+
+    numero_bl: Mapped[str] = mapped_column(String(50), nullable=False)
+    booking_no: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    export_references: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    referencia_cliente: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+
+    # Partes
+    shipper_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=True)
+    shipper_texto: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    consignee_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=True)
+    consignee_texto: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    notify_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=True)
+    notify_texto: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    agente_destino: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Ruta
+    pre_carriage_by: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    place_of_receipt: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    puerto_embarque_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_aeropuerto.id"), nullable=True)
+    puerto_descarga_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_aeropuerto.id"), nullable=True)
+    place_of_delivery: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    onward_inland_routing: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    buque: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    viaje: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+
+    # Fechas — las de tracking no vienen en el BL pero sin ellas no se hace
+    # seguimiento, que es lo que más usan (dos o tres veces por semana).
+    fecha_emision: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    lugar_emision: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    shipped_on_board: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    etd: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    eta: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    fecha_arribo: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    # Condiciones
+    termino: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)      # CY-CY, CY-CFS…
+    tipo_carga: Mapped[str] = mapped_column(String(5), default="FCL", nullable=False)
+    tipo_pago_flete: Mapped[str] = mapped_column(String(10), default="PREPAID", nullable=False)
+    freight_to_be_paid_at: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    num_originales: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    declared_value: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    free_days: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+
+    # Carga
+    say_total: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    marcas: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    descripcion_mercancia: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    bultos_cantidad: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    bultos_clase: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    carrier_receipt: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    peso_bruto_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    tara_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    cbm: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+
+    notas: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    operacion: Mapped["OpeOperacion"] = relationship("OpeOperacion", back_populates="mbls")
+    naviera: Mapped[Optional["OpeAerolinea"]] = relationship("OpeAerolinea", foreign_keys=[naviera_id])
+    hbls: Mapped[list["OpeHbl"]] = relationship("OpeHbl", back_populates="mbl")
+    contenedores: Mapped[list["OpeContenedor"]] = relationship("OpeContenedor", back_populates="mbl")
+
+
+class OpeHbl(Base, AuditMixin):
+    """Bill of Lading hijo. RECIBIDO del agente en importación; EMITIDO por
+    Universal Cargo en exportación — por eso tiene ciclo de vida propio."""
+
+    __tablename__ = "ope_hbl"
+    __table_args__ = (
+        CheckConstraint(f"origen IN {_ORIGEN_BL}", name="chk_hbl_origen"),
+        CheckConstraint(f"estado IN {_ESTADOS_DOC}", name="chk_hbl_estado"),
+        CheckConstraint(f"tipo_carga IN {_TIPO_CARGA}", name="chk_hbl_tipo_carga"),
+        CheckConstraint(f"tipo_pago_flete IN {_PAGO_FLETE}", name="chk_hbl_pago_flete"),
+        Index("idx_hbl_operacion", "operacion_id"),
+        Index("idx_hbl_mbl", "mbl_id"),
+        Index("idx_hbl_numero", "numero_hbl"),
+        Index("idx_hbl_booking", "booking_no"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    operacion_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_operacion.id"), nullable=False)
+    mbl_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_mbl.id"), nullable=True)
+    # Cliente/cotización al que pertenece esta casa, igual que en la HAWB.
+    cotizacion_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_cotizacion.id"), nullable=True, index=True)
+
+    origen: Mapped[str] = mapped_column(String(10), default="RECIBIDO", nullable=False)
+    # Quién lo emitió cuando es RECIBIDO (el agente en origen, ej. KCS).
+    emisor_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=True)
+    emisor_texto: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    numero_hbl: Mapped[str] = mapped_column(String(50), nullable=False)
+    booking_no: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    export_references: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    referencia_cliente: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    do_numero: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    shipper_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=True)
+    shipper_texto: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    consignee_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=True)
+    consignee_texto: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # "TO ORDER" hace el BL negociable: no es un tercero, es una condición.
+    consignee_a_la_orden: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=text("false"))
+    notify_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("adm_tercero.id"), nullable=True)
+    notify_texto: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    agente_entrega: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    pre_carriage_by: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    place_of_receipt: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    puerto_embarque_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_aeropuerto.id"), nullable=True)
+    puerto_descarga_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_aeropuerto.id"), nullable=True)
+    place_of_delivery: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    onward_inland_routing: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    buque: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    viaje: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+
+    fecha_emision: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    lugar_emision: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    shipped_on_board: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    etd: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    eta: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    fecha_arribo: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    termino: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    tipo_carga: Mapped[str] = mapped_column(String(5), default="FCL", nullable=False)
+    tipo_pago_flete: Mapped[str] = mapped_column(String(10), default="PREPAID", nullable=False)
+    freight_to_be_paid_at: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    num_originales: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    declared_value: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+
+    say_total: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    marcas: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    descripcion_mercancia: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    bultos_cantidad: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    bultos_clase: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    carrier_receipt: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    peso_bruto_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    cbm: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+
+    notas: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    estado: Mapped[str] = mapped_column(String(20), default="BORRADOR", nullable=False)
+    emitido_por: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
+    emitido_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    anulado_por: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), nullable=True)
+    anulado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    anulado_motivo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    operacion: Mapped["OpeOperacion"] = relationship("OpeOperacion", back_populates="hbls")
+    mbl: Mapped[Optional["OpeMbl"]] = relationship("OpeMbl", back_populates="hbls")
+    cotizacion: Mapped[Optional["OpeCotizacion"]] = relationship("OpeCotizacion", foreign_keys=[cotizacion_id])
+    contenedores: Mapped[list["OpeHblContenedor"]] = relationship(
+        "OpeHblContenedor", back_populates="hbl", cascade="all, delete-orphan")
+    cargos: Mapped[list["OpeBlCargo"]] = relationship(
+        "OpeBlCargo", back_populates="hbl", cascade="all, delete-orphan",
+        order_by="OpeBlCargo.orden")
+
+
+class OpeContenedor(Base, AuditMixin):
+    """Contenedor físico. Va aparte porque un HBL puede amparar varios y un
+    contenedor puede llevar varios HBL (LCL)."""
+
+    __tablename__ = "ope_contenedor"
+    __table_args__ = (
+        Index("idx_contenedor_operacion", "operacion_id"),
+        Index("idx_contenedor_numero", "numero"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    operacion_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_operacion.id"), nullable=False)
+    mbl_id: Mapped[Optional[uuid.UUID]] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_mbl.id"), nullable=True)
+
+    numero: Mapped[str] = mapped_column(String(20), nullable=False)
+    sello: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    tipo: Mapped[Optional[str]] = mapped_column(String(15), nullable=True)   # 20GP, 20ST, 40HC, 40RH…
+    tara_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    peso_bruto_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    cbm: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    # Los free days se negocian y hoy se anotan a mano en las notas de la cotización.
+    fecha_devolucion: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    notas: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    operacion: Mapped["OpeOperacion"] = relationship("OpeOperacion", back_populates="contenedores")
+    mbl: Mapped[Optional["OpeMbl"]] = relationship("OpeMbl", back_populates="contenedores")
+    hbls: Mapped[list["OpeHblContenedor"]] = relationship(
+        "OpeHblContenedor", back_populates="contenedor", cascade="all, delete-orphan")
+
+
+class OpeHblContenedor(Base):
+    """Puente N:M. Lleva cifras propias porque en LCL cada HBL aporta su parte
+    de piezas, peso y volumen dentro del mismo contenedor."""
+
+    __tablename__ = "ope_hbl_contenedor"
+    __table_args__ = (
+        UniqueConstraint("hbl_id", "contenedor_id", name="uq_hbl_contenedor"),
+        Index("idx_hbl_cont_hbl", "hbl_id"),
+        Index("idx_hbl_cont_contenedor", "contenedor_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hbl_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_hbl.id"), nullable=False)
+    contenedor_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_contenedor.id"), nullable=False)
+    piezas: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    peso_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    cbm: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+
+    hbl: Mapped["OpeHbl"] = relationship("OpeHbl", back_populates="contenedores")
+    contenedor: Mapped["OpeContenedor"] = relationship("OpeContenedor", back_populates="hbls")
+
+
+class OpeBlCargo(Base):
+    """Cuadro Freight & Charges del BL. Es tabla y no un flag porque al emitir
+    el HBL el flete se imprime desglosado."""
+
+    __tablename__ = "ope_bl_cargo"
+    __table_args__ = (
+        CheckConstraint(f"pago IN {_PAGO_FLETE}", name="chk_bl_cargo_pago"),
+        Index("idx_bl_cargo_hbl", "hbl_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hbl_id: Mapped[uuid.UUID] = mapped_column(pg.UUID(as_uuid=True), ForeignKey("ope_hbl.id"), nullable=False)
+    orden: Mapped[int] = mapped_column(SmallInteger, default=1, nullable=False)
+    concepto: Mapped[str] = mapped_column(String(120), nullable=False)
+    tarifa: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    unidad: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    moneda: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
+    valor: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    pago: Mapped[str] = mapped_column(String(10), default="PREPAID", nullable=False)
+
+    hbl: Mapped["OpeHbl"] = relationship("OpeHbl", back_populates="cargos")
 
 
 # ---------------------------------------------------------------------------
