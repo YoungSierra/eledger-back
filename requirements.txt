@@ -11,4 +11,11 @@ python-multipart==0.0.20
 python-dotenv==1.0.1
 httpx==0.28.1
 
+# Hash de contraseñas (app/core/security.py usa bcrypt directo, sin passlib)
+bcrypt==5.0.0
+# Exportación a Excel de reportes e importadores
+openpyxl==3.1.5
+# Fernet para cifrar credenciales del PTH (app/core/cifrado.py)
+cryptography==48.0.0
+
 boto3==1.43.57
